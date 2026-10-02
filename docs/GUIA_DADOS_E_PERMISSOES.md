@@ -179,7 +179,8 @@ Tabelas:
 Regras:
 
 - Relatorios usam quinzena como unidade de trabalho.
-- Existe tolerancia de 2 dias para atrasos.
+- A primeira quinzena encerra no dia 15; a segunda encerra no ultimo dia do mes.
+- Quando nao ha entrega, o registro deve indicar `Relatório não foi entregue nessa quinzena`.
 - Planner e relatorios se integram por `report_week_goal.planner_task_id`.
 - Exclusoes relevantes entram em log.
 

@@ -134,9 +134,9 @@ npm run notify:run-once
 - Página inicial autenticada: `/relatorios`.
 - Usuários são desativados logicamente, não apagados fisicamente, para preservar histórico.
 - Membros inativos deixam de aparecer nas listas operacionais.
-- Relatórios quinzenais possuem tolerância de 2 dias:
-  - primeira quinzena: até o fim do dia 17;
-  - segunda quinzena: até o fim do dia 02 do mês seguinte.
+- Relatorios quinzenais encerram no fechamento oficial da quinzena:
+  - primeira quinzena: ate o fim do dia 15;
+  - segunda quinzena: ate o fim do ultimo dia do mes.
 - O planner e os relatórios se conectam por `report_week_goal.planner_task_id`.
 - Advertências são históricas e append-only: não apagar histórico.
 - Presença usa PostgreSQL como fonte de verdade; CSV local é apenas contingência.

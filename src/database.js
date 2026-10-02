@@ -180,7 +180,7 @@ function addDaysToDateKey(dateKey, days) {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
 
-function reportDueGraceDeadlineSql(dueAt, graceDays = 1) {
+function reportDueGraceDeadlineSql(dueAt, graceDays = 0) {
   const dateKey = String(dueAt || "").slice(0, 10);
   const deadlineDateKey = addDaysToDateKey(dateKey, graceDays);
   const fortnightEndDateKey = resolveFortnightEndFromDateKey(dateKey);
@@ -191,7 +191,7 @@ function reportDueGraceDeadlineSql(dueAt, graceDays = 1) {
   return effectiveDateKey ? `${effectiveDateKey} 23:59:59` : null;
 }
 
-function isReportDueOverdue(dueAt, nowSql, graceDays = 1) {
+function isReportDueOverdue(dueAt, nowSql, graceDays = 0) {
   const deadlineSql = reportDueGraceDeadlineSql(dueAt, graceDays);
   return Boolean(deadlineSql && nowSql && deadlineSql < nowSql);
 }
@@ -3666,7 +3666,7 @@ async function listTaskAuditLogsForMember(memberId, { projectId = null, limit = 
 }
 
 // FUNCAO: refreshPlannerTaskLifecycle.
-async function refreshPlannerTaskLifecycle({ now = null, graceDays = 1 } = {}) {
+async function refreshPlannerTaskLifecycle({ now = null, graceDays = 0 } = {}) {
   const nowSql = toSqlDateTime(now || new Date());
   const nowDate = fromSqlDateTime(nowSql);
   if (!nowDate || !nowSql) {
@@ -3705,11 +3705,15 @@ async function refreshPlannerTaskLifecycle({ now = null, graceDays = 1 } = {}) {
         UPDATE report_week_goal
         SET
           task_state = 'missed',
+          description = CASE
+            WHEN TRIM(COALESCE(description, '')) = '' THEN ?
+            ELSE description
+          END,
           due_at = COALESCE(due_at, ?),
           updated_at = CURRENT_TIMESTAMP
         WHERE planner_task_id = ?
       `,
-      ).run(task.due_at, task.id));
+      ).run("Relatório não foi entregue nessa quinzena", task.due_at, task.id));
 
       (await createTaskAuditLog({
         db,
@@ -3727,9 +3731,43 @@ async function refreshPlannerTaskLifecycle({ now = null, graceDays = 1 } = {}) {
       }));
     }));
 
+    const staleReportGoals = (await db
+      .prepare(
+        `
+        SELECT id, due_at
+        FROM report_week_goal
+        WHERE is_completed = 0
+          AND task_state = 'active'
+          AND planner_task_id IS NULL
+          AND due_at IS NOT NULL
+          AND due_at <= ?
+        ORDER BY due_at ASC, id ASC
+      `,
+      )
+      .all(nowSql))
+      .filter((goal) => isReportDueOverdue(goal.due_at, nowSql, graceDays));
+
+    if (staleReportGoals.length) {
+      const placeholders = staleReportGoals.map(() => "?").join(", ");
+      (await db.prepare(
+        `
+        UPDATE report_week_goal
+        SET
+          task_state = 'missed',
+          description = CASE
+            WHEN TRIM(COALESCE(description, '')) = '' THEN ?
+            ELSE description
+          END,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id IN (${placeholders})
+      `,
+      ).run("Relatório não foi entregue nessa quinzena", ...staleReportGoals.map((goal) => goal.id)));
+    }
+
     return {
-      updatedCount: staleTasks.length,
+      updatedCount: staleTasks.length + staleReportGoals.length,
       taskIds: staleTasks.map((task) => task.id),
+      goalIds: staleReportGoals.map((goal) => goal.id),
     };
   }));
 }

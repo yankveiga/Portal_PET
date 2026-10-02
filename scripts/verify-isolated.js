@@ -62,6 +62,20 @@ async function main() {
     assert.ok(await database.getReportWeekGoalByPlannerTaskId(task.id));
     await database.updatePlannerTaskCompletion({ id: task.id, isCompleted: true, actorUserId: adminUser.id });
     assert.equal((await database.getPlannerTaskById(task.id)).is_completed, true);
+    assert.equal(database.isReportDueOverdue("2026-06-15 12:00:00", "2026-06-15 23:59:59"), false);
+    assert.equal(database.isReportDueOverdue("2026-06-15 12:00:00", "2026-06-16 00:00:00"), true);
+    assert.equal(database.isReportDueOverdue("2026-06-30 12:00:00", "2026-06-30 23:59:59"), false);
+    assert.equal(database.isReportDueOverdue("2026-06-30 12:00:00", "2026-07-01 00:00:00"), true);
+    const missedTask = await database.createPlannerTask({ projectId: project.id, assignedMemberId: member.id, createdByUserId: adminUser.id, title: "Relatorio sem entrega", dueAt: "2026-06-30 12:00:00" });
+    await database.syncReportWeekGoalFromPlannerTask(missedTask, { createdByUserId: adminUser.id });
+    await database.refreshPlannerTaskLifecycle({ now: new Date("2026-07-01T03:00:00Z"), graceDays: 0 });
+    assert.equal((await database.getPlannerTaskById(missedTask.id)).workflow_state, "missed");
+    const missedGoal = await database.getReportWeekGoalByPlannerTaskId(missedTask.id);
+    assert.equal(missedGoal.task_state, "missed");
+    assert.equal(missedGoal.description, "Relatório não foi entregue nessa quinzena");
+    const directGoal = await database.createReportWeekGoal({ memberId: member.id, projectId: project.id, createdByUserId: adminUser.id, weekStart: "2026-06-01", dueAt: "2026-06-15 12:00:00", activity: "Meta direta sem entrega" });
+    await database.refreshPlannerTaskLifecycle({ now: new Date("2026-06-16T03:00:00Z"), graceDays: 0 });
+    assert.equal((await database.getReportWeekGoalById(directGoal.id)).description, "Relatório não foi entregue nessa quinzena");
 
     const conversation = await database.createChatConversation({ createdByUserId: adminUser.id, participantUserIds: [common.id] });
     await database.createChatMessage({ conversationId: conversation.id, authorUserId: adminUser.id, text: "Mensagem isolada" });
@@ -73,6 +87,16 @@ async function main() {
     assert.equal((await database.registerEventAttendance({ eventId: event.id, badgeCode: "isolated-badge", checkedInByUserId: adminUser.id })).success, false);
     await database.upsertReportFortnightMemberNote({ memberId: member.id, authorUserId: adminUser.id, weekStart: "2026-10-01", content: "Complemento de teste" });
     assert.equal((await database.getReportFortnightMemberNote({ memberId: member.id, weekStart: "2026-10-01" })).content, "Complemento de teste");
+    const { generateMonthlyReportPdf } = require("../src/pdf");
+    const monthlyPdf = await generateMonthlyReportPdf({
+      member,
+      monthKey: "2026-10",
+      goals: await database.listReportMonthGoalsForMember(member.id, { monthKey: "2026-10" }),
+      memberFortnightNotes: await database.listReportMonthMemberNotesForPdf(member.id, { monthKey: "2026-10" }),
+      generatedByName: "Verificacao isolada",
+    });
+    assert.ok(Buffer.isBuffer(monthlyPdf), "PDF mensal nao foi gerado como Buffer.");
+    assert.ok(monthlyPdf.length > 1000, "PDF mensal gerado parece invalido.");
     const { createApp } = require("../src/app");
     const app = await createApp();
     server = await new Promise(resolve => { const listening = app.listen(0, "127.0.0.1", () => resolve(listening)); });

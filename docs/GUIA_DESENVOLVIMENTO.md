@@ -151,7 +151,7 @@ Mudancas comuns:
 Cuidados:
 
 - Relatorios e planner sao integrados por `planner_task_id`.
-- Respeite tolerancia de 2 dias.
+- A quinzena fecha no dia 15 ou no ultimo dia do mes; sem entrega, marque como nao entregue.
 - Nao carregar listas pesadas sem necessidade.
 - O template e grande; alteracoes devem ser localizadas.
 

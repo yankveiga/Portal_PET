@@ -151,16 +151,12 @@ function normalizeProjectColor(value, fallback = DEFAULT_PROJECT_COLOR) {
   return /^#[0-9a-fA-F]{6}$/.test(normalized) ? normalized.toLowerCase() : fallback;
 }
 
-// DETALHE: Mantem a quinzena anterior ate o fim da tolerancia e libera o novo ciclo nos dias 02 e 17.
+// DETALHE: Mantem a quinzena atual ate o fechamento oficial: dia 15 ou ultimo dia do mes.
 
 function getCurrentWeekStartDate() {
   const now = new Date();
   const parts = getDatePartsInTimeZone(now, REPORTS_TIMEZONE);
-  if (parts.day <= 1) {
-    const previousMonth = addMonths(parts.year, parts.month, -1);
-    return formatYmd(previousMonth.year, previousMonth.month, 16);
-  }
-  const fortnightStartDay = parts.day <= 16 ? 1 : 16;
+  const fortnightStartDay = parts.day <= 15 ? 1 : 16;
   return formatYmd(parts.year, parts.month, fortnightStartDay);
 }
 
@@ -856,7 +852,7 @@ function render(res, template, data = {}) {
     const nowSql = toSqlDateTime(new Date());
     if (Date.now() - plannerLifecycleLastCheckedAt >= plannerLifecycleCheckIntervalMs) {
       plannerLifecycleLastCheckedAt = Date.now();
-      (await database.refreshPlannerTaskLifecycle({ graceDays: 1 }));
+      (await database.refreshPlannerTaskLifecycle({ graceDays: 0 }));
     }
     const membersSummary = (await database.listReportMembersSummary());
     const requestedMemberId = parseId(data.selectedMemberId || req.query.member_id);
