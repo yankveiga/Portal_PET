@@ -1,3 +1,4 @@
+const asyncArray = require("../asyncArray");
 ﻿/*
  * ARQUIVO: src/routes/auth.js
  * FUNCAO: registra rotas de autenticacao, navegacao inicial e presenca.
@@ -5,6 +6,7 @@
  * - Alterar campos/validacao de login afeta sessao de todos os usuarios.
  * - Alterar retorno JSON de presenca impacta o frontend que consome a API.
  */
+const databaseAsync = require("../databaseAsync");
 
 function buildPlannerQuery({
   view = "member",
@@ -73,7 +75,7 @@ function registerAuthRoutes(ctx) {
   } = ctx;
   const loginDefaultPath = "/relatorios";
 
-  function canDeletePlannerTask(req, task) {
+  async function canDeletePlannerTask(req, task) {
     if (!task) {
       return false;
     }
@@ -82,7 +84,7 @@ function registerAuthRoutes(ctx) {
       return true;
     }
 
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     if (!currentMember?.is_active) {
       return false;
     }
@@ -91,27 +93,27 @@ function registerAuthRoutes(ctx) {
       return true;
     }
 
-    return canManageProject(req, task.project);
+    return (await canManageProject(req, task.project));
   }
 
-  function canCompletePlannerTask(req, task) {
-    return canDeletePlannerTask(req, task);
+  async function canCompletePlannerTask(req, task) {
+    return (await canDeletePlannerTask(req, task));
   }
 
-  function canCreatePlannerTaskForMember(req, project, memberId) {
+  async function canCreatePlannerTaskForMember(req, project, memberId) {
     if (!project || !memberId) {
       return false;
     }
 
-    if (canManageProject(req, project)) {
+    if ((await canManageProject(req, project))) {
       return true;
     }
 
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     return Boolean(
       currentMember?.is_active
       && Number(currentMember.id) === Number(memberId)
-      && isRequestProjectMember(req, project.id, currentMember.id),
+      && (await isRequestProjectMember(req, project.id, currentMember.id)),
     );
   }
 
@@ -217,7 +219,7 @@ app.get("/login", (req, res) => {
 
   // DETALHE: Rota POST /login: processa envio de formulario/acao, valida entrada, persiste dados e redireciona.
 
-  app.post("/login", (req, res) => {
+  app.post("/login", async (req, res) => {
     // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
     if (!ensureValidCsrf(req, res)) {
@@ -251,9 +253,9 @@ app.get("/login", (req, res) => {
       return renderLogin(res, { formData, errors });
     }
 
-    const user = database.getUserByUsername(formData.username);
+    const user = (await database.getUserByUsername(formData.username));
 
-    if (!user || !user.is_active || !bcrypt.compareSync(password, user.password_hash)) {
+    if (!user || !user.is_active || !(await bcrypt.compare(password, user.password_hash))) {
       req.flash("danger", "Usuário ou senha inválidos.");
       const nextQuery = formData.next
         ? `?next=${encodeURIComponent(formData.next)}`
@@ -304,18 +306,23 @@ app.get("/services", requireAuth, (req, res) => {
 
   // DETALHE: Rota GET /manutencao-usuarios: hub administrativo para membros, projetos e usuarios de acesso.
 
-  app.get("/manutencao-usuarios", requireAuth, requireAdminPage, (req, res) => {
-    return renderUserMaintenance(res);
+  app.get("/manutencao-usuarios", requireAuth, requireAdminPage, async (req, res) => {
+    return (await renderUserMaintenance(res));
   });
 
   // DETALHE: Rota GET /home: consulta dados necessarios e monta resposta (HTML/JSON) para a tela solicitada.
 
-  app.get("/home", requireAuth, (req, res) => {
+  app.get("/home", requireAuth, async (req, res, next) => {
     const tab = req.query.tab || "home";
-    const recentAtas = database.listRecentAtas(5).map((ata) => ({
-      ...ata,
-      canDelete: canManageProject(req, ata.project),
-    }));
+    let recentAtas;
+    try {
+      recentAtas = (await asyncArray.map((await databaseAsync.listRecentAtas(5)), async (ata) => ({
+        ...ata,
+        canDelete: (await canManageProject(req, ata.project)),
+      })));
+    } catch (error) {
+      return next(error);
+    }
 
     return render(res, "home.html", {
       title: "Atas",
@@ -327,8 +334,8 @@ app.get("/services", requireAuth, (req, res) => {
 
   // DETALHE: Rota GET /planner: consulta dados necessarios e monta resposta (HTML/JSON) para a tela solicitada.
 
-  app.get("/planner", requireAuth, (req, res) => {
-    const currentMember = getCurrentMember(req);
+  app.get("/planner", requireAuth, async (req, res, next) => {
+    const currentMember = (await getCurrentMember(req));
     const isAdmin = Boolean(req.currentUser?.is_admin);
     const requestedView = String(req.query.view || "").trim().toLowerCase();
     const viewMode = requestedView === "project" ? "project" : "member";
@@ -338,11 +345,11 @@ app.get("/services", requireAuth, (req, res) => {
       : "report-goals-panel";
     const hidePlannerCreate = String(req.query.hide_create || "").trim() === "1";
     const plannerEmbedded = String(req.query.embedded || "").trim() === "1";
-    const accessibleProjects = listAccessibleProjects(req);
+    const accessibleProjects = (await listAccessibleProjects(req));
     const accessibleProjectIds = new Set(accessibleProjects.map((project) => project.id));
-    const fullAccessibleProjects = database.listProjectsWithMembersByIds(
+    const fullAccessibleProjects = (await database.listProjectsWithMembersByIds(
       accessibleProjects.map((project) => project.id),
-    );
+    ));
     const fullAccessibleProjectsById = new Map(
       fullAccessibleProjects.map((project) => [Number(project.id), project]),
     );
@@ -356,10 +363,10 @@ app.get("/services", requireAuth, (req, res) => {
     const requestedMemberId = parseId(req.query.member_id);
     if (isAdmin) {
       selectedMember = requestedMemberId
-        ? getRequestMemberById(req, requestedMemberId)
+        ? (await getRequestMemberById(req, requestedMemberId))
         : (currentMember || null);
       if (!selectedMember) {
-        selectedMember = database.listActiveMembers()[0] || null;
+        selectedMember = (await database.listActiveMembers())[0] || null;
       }
     } else {
       selectedMember = currentMember || null;
@@ -367,7 +374,7 @@ app.get("/services", requireAuth, (req, res) => {
 
     const selectedMemberId = selectedMember?.id || null;
     const memberOptions = isAdmin
-      ? database.listActiveMembers()
+      ? (await database.listActiveMembers())
       : (selectedMember ? [selectedMember] : []);
     const memberViewMode = viewMode === "member";
     const effectiveViewMode = memberViewMode ? "member" : "project";
@@ -389,19 +396,24 @@ app.get("/services", requireAuth, (req, res) => {
     const plannerDueFrom = `${plannerMonth}-01 00:00:00`;
     const nextMonthForQuery = new Date(Date.UTC(monthYear, monthIndex + 1, 1));
     const plannerDueTo = `${nextMonthForQuery.getUTCFullYear()}-${String(nextMonthForQuery.getUTCMonth() + 1).padStart(2, "0")}-01 00:00:00`;
-    const baseTasks = effectiveViewMode === "project"
-      ? (selectedProjectId ? database.listPlannerTasks({
+    let baseTasks;
+    try {
+      baseTasks = effectiveViewMode === "project"
+      ? (selectedProjectId ? await databaseAsync.listPlannerTasks({
           projectId: selectedProjectId,
           includeCompleted: false,
           dueFrom: plannerDueFrom,
           dueTo: plannerDueTo,
         }) : [])
-      : (selectedMemberId ? database.listPlannerTasks({
+      : (selectedMemberId ? await databaseAsync.listPlannerTasks({
           memberId: selectedMemberId,
           includeCompleted: false,
           dueFrom: plannerDueFrom,
           dueTo: plannerDueTo,
         }) : []);
+    } catch (error) {
+      return next(error);
+    }
     const visibleTasks = isAdmin
       ? baseTasks
       : baseTasks.filter((task) => accessibleProjectIds.has(task.project_id));
@@ -481,12 +493,12 @@ app.get("/services", requireAuth, (req, res) => {
     const selectedDay = /^\d{4}-\d{2}-\d{2}$/.test(selectedDayQuery)
       ? selectedDayQuery
       : defaultSelectedDay;
-    const selectedDayTasks = (tasksByDay[selectedDay] || []).map((task) => ({
+    const selectedDayTasks = (await asyncArray.map((tasksByDay[selectedDay] || []), async (task) => ({
       ...task,
-      can_delete: canDeletePlannerTask(req, task),
-      can_complete: canCompletePlannerTask(req, task),
-      can_manage: canManageProject(req, task.project),
-    }));
+      can_delete: (await canDeletePlannerTask(req, task)),
+      can_complete: (await canCompletePlannerTask(req, task)),
+      can_manage: (await canManageProject(req, task.project)),
+    })));
     const prevMonthDate = new Date(Date.UTC(monthYear, monthIndex - 1, 1));
     const nextMonthDate = new Date(Date.UTC(monthYear, monthIndex + 1, 1));
     const prevMonthKey = `${prevMonthDate.getUTCFullYear()}-${String(prevMonthDate.getUTCMonth() + 1).padStart(2, "0")}`;
@@ -498,15 +510,13 @@ app.get("/services", requireAuth, (req, res) => {
     }).format(new Date(`${plannerMonth}-01T12:00:00Z`));
 
     const currentMemberId = currentMember?.is_active ? currentMember.id : null;
-    const creatableProjects = fullAccessibleProjects
-      .filter((project) => (
-        canManageProject(req, project)
-        || (currentMemberId && isRequestProjectMember(req, project.id, currentMemberId))
-      ))
-      .map((project) => ({
+    const creatableProjects = (await asyncArray.filter((await asyncArray.map(fullAccessibleProjects, async (project) => (
+        (await canManageProject(req, project))
+        || (currentMemberId && (await isRequestProjectMember(req, project.id, currentMemberId)))
+      ))), async (project) => ({
         ...project,
-        can_create_for_others: canManageProject(req, project),
-      }));
+        can_create_for_others: (await canManageProject(req, project)),
+      })));
     const creatableProjectIds = new Set(creatableProjects.map((project) => project.id));
 
     const plannerFormState = req.session?.plannerFormState || null;
@@ -546,9 +556,9 @@ app.get("/services", requireAuth, (req, res) => {
     const selectedCreateProjectId = selectedCreateProject?.id || null;
     const createMemberOptions = selectedCreateProject
       ? (
-        canManageProject(req, selectedCreateProject)
+        (await canManageProject(req, selectedCreateProject))
           ? (selectedCreateProject.active_members || [])
-          : (currentMemberId && isRequestProjectMember(req, selectedCreateProject.id, currentMemberId)
+          : (currentMemberId && (await isRequestProjectMember(req, selectedCreateProject.id, currentMemberId))
             ? (selectedCreateProject.active_members || []).filter((member) => member.id === currentMemberId)
             : [])
       )
@@ -642,12 +652,12 @@ app.get("/services", requireAuth, (req, res) => {
 
   // DETALHE: Rota POST /planner/tasks/create: processa envio de formulario/acao, valida entrada, persiste dados e redireciona.
 
-  app.post("/planner/tasks/create", requireAuth, (req, res) => {
+  app.post("/planner/tasks/create", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
 
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     const fallbackQuery = buildPlannerQuery({
       view: req.body.view_mode,
       projectId: parseId(req.body.return_project_id),
@@ -673,7 +683,7 @@ app.get("/services", requireAuth, (req, res) => {
     const projectId = parseId(formData.projectId);
     const memberId = parseId(formData.memberId);
     const scopeMemberId = parseId(req.body.return_member_id) || null;
-    const project = projectId ? getRequestProjectById(req, projectId) : null;
+    const project = projectId ? (await getRequestProjectById(req, projectId)) : null;
 
     if (!project) {
       errors.projectId = ["Selecione um projeto válido."];
@@ -693,7 +703,7 @@ app.get("/services", requireAuth, (req, res) => {
       if (!recurrenceQueue.length && memberId && projectMemberIds.has(memberId)) {
         recurrenceQueue = [memberId];
       }
-      if (!canManageProject(req, project)) {
+      if (!(await canManageProject(req, project))) {
         const ownMemberId = currentMember?.id || null;
         recurrenceQueue = ownMemberId && recurrenceQueue.includes(ownMemberId)
           ? [ownMemberId]
@@ -707,13 +717,13 @@ app.get("/services", requireAuth, (req, res) => {
       }
     } else if (!memberId) {
       errors.memberId = ["Selecione o membro da tarefa."];
-    } else if (project && !isRequestProjectMember(req, project.id, memberId)) {
+    } else if (project && !(await isRequestProjectMember(req, project.id, memberId))) {
       errors.memberId = ["O membro selecionado não pertence ao projeto escolhido."];
-    } else if (project && !canCreatePlannerTaskForMember(req, project, memberId)) {
+    } else if (project && !(await canCreatePlannerTaskForMember(req, project, memberId))) {
       errors.memberId = ["Você só pode criar tarefas para si mesmo, exceto se for coordenador do projeto."];
     } else {
       const ownMemberId = currentMember?.id || null;
-      const canCreateForOthers = project && canManageProject(req, project);
+      const canCreateForOthers = project && (await canManageProject(req, project));
       if (!canCreateForOthers && scopeMemberId && memberId && scopeMemberId !== memberId) {
         errors.memberId = ["Crie tarefas para outro membro apenas no perfil dele em Relatórios."];
       } else if (!canCreateForOthers && !scopeMemberId && ownMemberId && memberId && ownMemberId !== memberId) {
@@ -767,7 +777,7 @@ app.get("/services", requireAuth, (req, res) => {
       const recurrenceNextIndex = recurrenceEnabled && recurrenceQueue.length > 1
         ? 1
         : 0;
-      const createdTask = database.createPlannerTask({
+      const createdTask = (await database.createPlannerTask({
         projectId: project.id,
         assignedMemberId,
         createdByUserId: req.currentUser.id,
@@ -782,11 +792,11 @@ app.get("/services", requireAuth, (req, res) => {
         recurrenceEvery: recurrenceEnabled ? recurrenceIntervalDays : null,
         recurrenceMemberQueue: recurrenceEnabled ? recurrenceQueue : null,
         recurrenceNextIndex: recurrenceEnabled ? recurrenceNextIndex : null,
-      });
+      }));
       if (createdTask) {
-        syncReportWeekGoalFromPlannerTask(createdTask, {
+        (await syncReportWeekGoalFromPlannerTask(createdTask, {
           createdByUserId: req.currentUser.id,
-        });
+        }));
       }
       req.flash("success", "Tarefa do Planner criada com sucesso.");
       return res.redirect(
@@ -810,7 +820,7 @@ app.get("/services", requireAuth, (req, res) => {
 
   // DETALHE: Rota POST /planner/tasks/:id/complete: conclui tarefa e gera proxima recorrencia quando aplicavel.
 
-  app.post("/planner/tasks/:id/complete", requireAuth, (req, res) => {
+  app.post("/planner/tasks/:id/complete", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -832,13 +842,13 @@ app.get("/services", requireAuth, (req, res) => {
       return res.redirect(`${urlFor("planner")}${fallbackQuery}`);
     }
 
-    const task = database.getPlannerTaskById(taskId);
+    const task = (await database.getPlannerTaskById(taskId));
     if (!task) {
       req.flash("danger", "Tarefa do Planner não encontrada.");
       return res.redirect(`${urlFor("planner")}${fallbackQuery}`);
     }
 
-    if (!canCompletePlannerTask(req, task)) {
+    if (!(await canCompletePlannerTask(req, task))) {
       req.flash("danger", "Você não tem permissão para concluir esta tarefa.");
       return res.redirect(`${urlFor("planner")}${fallbackQuery}`);
     }
@@ -854,24 +864,24 @@ app.get("/services", requireAuth, (req, res) => {
         && database.isReportDueOverdue(task.due_at, completedAt);
       const completedTask = taskIsMissed
         || database.isReportDueOverdue(task.due_at, completedAt)
-        ? database.markPlannerTaskDoneLate({
+        ? (await database.markPlannerTaskDoneLate({
           id: task.id,
           actorUserId: req.currentUser.id,
           completedAt,
-        })
-        : database.updatePlannerTaskCompletion({
+        }))
+        : (await database.updatePlannerTaskCompletion({
           id: task.id,
           isCompleted: true,
           completedAt,
           updatedAt: completedAt,
           actorUserId: req.currentUser.id,
-        });
+        }));
       if (completedTask) {
-        syncReportWeekGoalFromPlannerTask(completedTask, {
+        (await syncReportWeekGoalFromPlannerTask(completedTask, {
           createdByUserId: req.currentUser.id,
-        });
+        }));
       }
-      database.createPlannerTaskCompletionLog({
+      (await database.createPlannerTaskCompletionLog({
         taskId: task.id,
         projectId: task.project_id,
         assignedMemberId: task.assigned_member_id,
@@ -883,7 +893,7 @@ app.get("/services", requireAuth, (req, res) => {
         label: task.label || null,
         dueAt: task.due_at,
         completedAt,
-      });
+      }));
 
       const queue = Array.isArray(task.recurrence_member_queue)
         ? task.recurrence_member_queue
@@ -907,7 +917,7 @@ app.get("/services", requireAuth, (req, res) => {
           : "todo";
         const upcomingIndex = (nextQueueIndex + 1) % queue.length;
 
-        const nextTask = database.createPlannerTask({
+        const nextTask = (await database.createPlannerTask({
           projectId: task.project_id,
           assignedMemberId: nextAssigneeId,
           createdByUserId: req.currentUser.id,
@@ -922,11 +932,11 @@ app.get("/services", requireAuth, (req, res) => {
           recurrenceEvery,
           recurrenceMemberQueue: queue,
           recurrenceNextIndex: upcomingIndex,
-        });
+        }));
         if (nextTask) {
-          syncReportWeekGoalFromPlannerTask(nextTask, {
+          (await syncReportWeekGoalFromPlannerTask(nextTask, {
             createdByUserId: req.currentUser.id,
-          });
+          }));
         }
       }
 
@@ -940,7 +950,7 @@ app.get("/services", requireAuth, (req, res) => {
   });
 
   // DETALHE: Rota POST /planner/tasks/:id/status: altera bucket (A Fazer/Em Execução/Realizado).
-  app.post("/planner/tasks/:id/status", requireAuth, (req, res) => {
+  app.post("/planner/tasks/:id/status", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -963,12 +973,12 @@ app.get("/services", requireAuth, (req, res) => {
       return res.redirect(`${urlFor("planner")}${fallbackQuery}`);
     }
 
-    const task = database.getPlannerTaskById(taskId);
+    const task = (await database.getPlannerTaskById(taskId));
     if (!task) {
       req.flash("danger", "Tarefa do Planner não encontrada.");
       return res.redirect(`${urlFor("planner")}${fallbackQuery}`);
     }
-    if (!canManageProject(req, task.project) && Number(task.assigned_member_id) !== Number(getCurrentMember(req)?.id)) {
+    if (!(await canManageProject(req, task.project)) && Number(task.assigned_member_id) !== Number((await getCurrentMember(req))?.id)) {
       req.flash("danger", "Você não tem permissão para mover esta tarefa.");
       return res.redirect(`${urlFor("planner")}${fallbackQuery}`);
     }
@@ -989,24 +999,24 @@ app.get("/services", requireAuth, (req, res) => {
           || database.isReportDueOverdue(task.due_at, updatedAt)
         )
       )
-        ? database.markPlannerTaskDoneLate({
+        ? (await database.markPlannerTaskDoneLate({
           id: task.id,
           actorUserId: req.currentUser.id,
           completedAt: updatedAt,
-        })
-        : database.updatePlannerTaskStatus({
+        }))
+        : (await database.updatePlannerTaskStatus({
           id: task.id,
           status: nextStatus,
           updatedAt,
           actorUserId: req.currentUser.id,
-        });
+        }));
       if (updatedTask) {
-        syncReportWeekGoalFromPlannerTask(updatedTask, {
+        (await syncReportWeekGoalFromPlannerTask(updatedTask, {
           createdByUserId: req.currentUser.id,
-        });
+        }));
       }
       if (updatedTask?.is_completed && !wasCompleted) {
-        database.createPlannerTaskCompletionLog({
+        (await database.createPlannerTaskCompletionLog({
           taskId: updatedTask.id,
           projectId: updatedTask.project_id,
           assignedMemberId: updatedTask.assigned_member_id,
@@ -1018,7 +1028,7 @@ app.get("/services", requireAuth, (req, res) => {
           label: updatedTask.label || null,
           dueAt: updatedTask.due_at,
           completedAt: updatedTask.completed_at || updatedAt,
-        });
+        }));
       }
       req.flash("success", "Status da tarefa atualizado.");
     } catch (error) {
@@ -1031,7 +1041,7 @@ app.get("/services", requireAuth, (req, res) => {
 
   // DETALHE: Rota POST /planner/tasks/:id/delete: remove tarefa quando usuario tem permissao no projeto.
 
-  app.post("/planner/tasks/:id/delete", requireAuth, (req, res) => {
+  app.post("/planner/tasks/:id/delete", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -1053,30 +1063,30 @@ app.get("/services", requireAuth, (req, res) => {
       return res.redirect(`${urlFor("planner")}${fallbackQuery}`);
     }
 
-    const task = database.getPlannerTaskById(taskId);
+    const task = (await database.getPlannerTaskById(taskId));
     if (!task) {
       req.flash("danger", "Tarefa do Planner não encontrada.");
       return res.redirect(`${urlFor("planner")}${fallbackQuery}`);
     }
 
-    if (!canDeletePlannerTask(req, task)) {
+    if (!(await canDeletePlannerTask(req, task))) {
       req.flash("danger", "Você não tem permissão para excluir esta tarefa.");
       return res.redirect(`${urlFor("planner")}${fallbackQuery}`);
     }
 
     try {
-      const linkedGoal = database.getReportWeekGoalByPlannerTaskId(task.id);
+      const linkedGoal = (await database.getReportWeekGoalByPlannerTaskId(task.id));
       if (linkedGoal) {
         if (linkedGoal.is_completed) {
-          database.deleteReportWeekGoalWithAudit(linkedGoal.id, req.currentUser.id);
+          (await database.deleteReportWeekGoalWithAudit(linkedGoal.id, req.currentUser.id));
         } else {
-          database.deleteReportWeekGoal(linkedGoal.id);
+          (await database.deleteReportWeekGoal(linkedGoal.id));
         }
       }
-      database.deletePlannerTask(task.id, {
+      (await database.deletePlannerTask(task.id, {
         actorUserId: req.currentUser.id,
         reportGoalId: linkedGoal?.id || null,
-      });
+      }));
       if (linkedGoal) {
         req.flash("success", "Tarefa do Planner e meta vinculada no relatório foram removidas.");
       } else {

@@ -27,9 +27,9 @@ function registerAtaRoutes(ctx) {
     logError,
   } = ctx;
 
-app.get("/atas/create", requireAuth, (req, res) => {
-    const availableProjects = listAccessibleProjects(req);
-    return renderAtaForm(req, res, {
+app.get("/atas/create", requireAuth, async (req, res) => {
+    const availableProjects = (await listAccessibleProjects(req));
+    return (await renderAtaForm(req, res, {
       title: "Criar Nova Ata",
       formData: {
         projectId: "",
@@ -40,19 +40,19 @@ app.get("/atas/create", requireAuth, (req, res) => {
       },
       errors: {},
       projects: availableProjects,
-    });
+    }));
   });
 
   // DETALHE: Rota GET /atas/create/for/:project_id: consulta dados necessarios e monta resposta (HTML/JSON) para a tela solicitada.
 
-  app.get("/atas/create/for/:project_id", requireAuth, (req, res) => {
+  app.get("/atas/create/for/:project_id", requireAuth, async (req, res) => {
     const projectId = parseId(req.params.project_id);
-    const project = database.getProjectById(projectId);
+    const project = (await database.getProjectById(projectId));
     if (!project) {
       return notFound(res);
     }
 
-    if (!canCreateAtaForProject(req, project)) {
+    if (!(await canCreateAtaForProject(req, project))) {
       req.flash(
         "warning",
         "Você só pode criar atas para projetos nos quais está vinculado como membro.",
@@ -60,7 +60,7 @@ app.get("/atas/create", requireAuth, (req, res) => {
       return res.redirect(urlFor("create_ata"));
     }
 
-    return renderAtaForm(req, res, {
+    return (await renderAtaForm(req, res, {
       title: "Criar Nova Ata",
       formData: {
         projectId: String(projectId),
@@ -70,8 +70,8 @@ app.get("/atas/create", requireAuth, (req, res) => {
         justifications: {},
       },
       errors: {},
-      projects: listAccessibleProjects(req),
-    });
+      projects: (await listAccessibleProjects(req)),
+    }));
   });
 
   // DETALHE: Inicio de bloco de rota declarada em multiplas linhas; revisar path e middlewares logo abaixo.
@@ -79,7 +79,7 @@ app.get("/atas/create", requireAuth, (req, res) => {
   app.post(
     ["/atas/create", "/atas/create/for/:project_id"],
     requireAuth,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
       if (!ensureValidCsrf(req, res)) {
@@ -98,11 +98,11 @@ app.get("/atas/create", requireAuth, (req, res) => {
 
       const errors = {};
       const projectId = parseId(formData.projectId);
-      const project = projectId ? database.getProjectById(projectId) : null;
+      const project = projectId ? (await database.getProjectById(projectId)) : null;
 
       if (!project) {
         errors.project = ["É necessário selecionar um projeto válido."];
-      } else if (!canCreateAtaForProject(req, project)) {
+      } else if (!(await canCreateAtaForProject(req, project))) {
         errors.project = [
           "Você só pode criar atas para projetos nos quais está vinculado como membro.",
         ];
@@ -146,12 +146,12 @@ app.get("/atas/create", requireAuth, (req, res) => {
       // DETALHE: Se houver erro de validacao, encerra cedo para evitar persistencia inconsistente.
 
       if (Object.keys(errors).length > 0) {
-        return renderAtaForm(req, res, {
+        return (await renderAtaForm(req, res, {
           title: "Criar Nova Ata",
           formData,
           errors,
-          projects: listAccessibleProjects(req),
-        });
+          projects: (await listAccessibleProjects(req)),
+        }));
       }
 
       const presentMemberIds = new Set(formData.presentMemberIds);
@@ -167,24 +167,24 @@ app.get("/atas/create", requireAuth, (req, res) => {
       });
 
       try {
-        database.createAta({
+        (await database.createAta({
           projectId,
           meetingDateTime,
           notes: formData.notes.trim(),
           presentMemberIds: [...presentMemberIds],
           justifications: justificationsToSave,
-        });
+        }));
         req.flash("success", "Ata criada com sucesso!");
         return res.redirect(urlFor("home"));
       } catch (error) {
         logError(req, "Erro ao criar ata:", error);
         req.flash("danger", `Erro ao criar ata: ${error.message}`);
-        return renderAtaForm(req, res, {
+        return (await renderAtaForm(req, res, {
           title: "Criar Nova Ata",
           formData,
           errors,
-          projects: listAccessibleProjects(req),
-        });
+          projects: (await listAccessibleProjects(req)),
+        }));
       }
     },
   );
@@ -192,7 +192,7 @@ app.get("/atas/create", requireAuth, (req, res) => {
   // DETALHE: Rota GET /atas/download/:id: consulta dados necessarios e monta resposta (HTML/JSON) para a tela solicitada.
 
   app.get("/atas/download/:id", requireAuth, async (req, res) => {
-    const ata = database.getAtaById(parseId(req.params.id));
+    const ata = (await database.getAtaById(parseId(req.params.id)));
     if (!ata) {
       return notFound(res);
     }
@@ -219,7 +219,7 @@ app.get("/atas/create", requireAuth, (req, res) => {
 
   // DETALHE: Rota POST /atas/delete/:id: processa envio de formulario/acao, valida entrada, persiste dados e redireciona.
 
-  app.post("/atas/delete/:id", requireAuth, (req, res) => {
+  app.post("/atas/delete/:id", requireAuth, async (req, res) => {
     // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
     if (!ensureValidCsrf(req, res)) {
@@ -227,12 +227,12 @@ app.get("/atas/create", requireAuth, (req, res) => {
     }
 
     const ataId = parseId(req.params.id);
-    const ata = database.getAtaById(ataId);
+    const ata = (await database.getAtaById(ataId));
     if (!ata) {
       return notFound(res);
     }
 
-    if (!canManageProject(req, ata.project)) {
+    if (!(await canManageProject(req, ata.project))) {
       req.flash(
         "warning",
         "Somente coordenadores do projeto podem excluir esta ata.",
@@ -241,7 +241,7 @@ app.get("/atas/create", requireAuth, (req, res) => {
     }
 
     try {
-      database.deleteAta(ataId);
+      (await database.deleteAta(ataId));
       req.flash("success", "Ata excluída com sucesso!");
     } catch (error) {
       logError(req, "Erro ao excluir ata:", error);

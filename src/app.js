@@ -1,3 +1,4 @@
+const asyncArray = require("./asyncArray");
 ﻿/*
  * ARQUIVO: src/app.js
  * FUNCAO: composicao principal da aplicacao (middlewares, autenticacao, validacoes e rotas HTTP).
@@ -81,6 +82,11 @@ const INVENTORY_ITEM_TYPES = new Set(["stock", "patrimony"]);
 const DEFAULT_PROJECT_COLOR = "#0b6bcb";
 const REPORTS_TIMEZONE = "America/Sao_Paulo";
 const ENABLE_REQUEST_LOGS = String(process.env.REQUEST_LOGS || "").trim() === "1";
+const ENABLE_PERFORMANCE_LOGS = String(process.env.PERFORMANCE_LOGS || "").trim() === "1";
+const SLOW_REQUEST_MS = Math.max(
+  100,
+  Number.parseInt(process.env.SLOW_REQUEST_MS || "750", 10) || 750,
+);
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   "image/jpeg",
@@ -145,16 +151,16 @@ function normalizeProjectColor(value, fallback = DEFAULT_PROJECT_COLOR) {
   return /^#[0-9a-fA-F]{6}$/.test(normalized) ? normalized.toLowerCase() : fallback;
 }
 
-// DETALHE: Calcula o inicio da quinzena (dia 1 ou 16) usado nos relatorios quinzenais.
+// DETALHE: Mantem a quinzena anterior ate o fim da tolerancia e libera o novo ciclo nos dias 02 e 17.
 
 function getCurrentWeekStartDate() {
   const now = new Date();
   const parts = getDatePartsInTimeZone(now, REPORTS_TIMEZONE);
-  if (parts.day <= 2) {
+  if (parts.day <= 1) {
     const previousMonth = addMonths(parts.year, parts.month, -1);
     return formatYmd(previousMonth.year, previousMonth.month, 16);
   }
-  const fortnightStartDay = parts.day <= 17 ? 1 : 16;
+  const fortnightStartDay = parts.day <= 16 ? 1 : 16;
   return formatYmd(parts.year, parts.month, fortnightStartDay);
 }
 
@@ -221,14 +227,18 @@ function normalizeMonthKey(value) {
 
 // DETALHE: Ponto central de composicao: configura Express, middlewares, regras de acesso e rotas.
 
-function createApp() {
-  database.ensureSchema();
+async function createApp() {
+  (await database.ensureSchema());
   fs.mkdirSync(config.uploadDir, { recursive: true });
   const notificationService = createNotificationService({ database, config });
   const unreadConversationCache = new Map();
   const unreadConversationCacheTtlMs = 5000;
+  let inventoryDashboardCache = null;
+  const inventoryDashboardCacheTtlMs = 15000;
   let plannerLifecycleLastCheckedAt = 0;
   const plannerLifecycleCheckIntervalMs = 60000;
+  let warningCycleLastCheckedAt = 0;
+  const warningCycleCheckIntervalMs = 300000;
 
   function getCachedRequestValue(req, namespace, key, loader) {
     if (!req.localCache) {
@@ -243,35 +253,35 @@ function createApp() {
     return value;
   }
 
-  function getRequestUserById(req, id) {
+  async function getRequestUserById(req, id) {
     return getCachedRequestValue(req, "userById", id, () => database.getUserById(id));
   }
 
-  function getRequestMemberById(req, id) {
-    return getCachedRequestValue(req, "memberById", id, () => database.getMemberById(id));
+  async function getRequestMemberById(req, id) {
+    return (await getCachedRequestValue(req, "memberById", id, async () => (await database.getMemberById(id))));
   }
 
-  function getRequestMemberByName(req, name) {
-    return getCachedRequestValue(req, "memberByName", name, () => database.getMemberByName(name));
+  async function getRequestMemberByName(req, name) {
+    return (await getCachedRequestValue(req, "memberByName", name, async () => (await database.getMemberByName(name))));
   }
 
-  function getRequestProjectById(req, id) {
-    return getCachedRequestValue(req, "projectById", id, () => database.getProjectById(id));
+  async function getRequestProjectById(req, id) {
+    return (await getCachedRequestValue(req, "projectById", id, async () => (await database.getProjectById(id))));
   }
 
-  function listRequestProjectsForMember(req, memberId) {
-    return getCachedRequestValue(req, "projectsForMember", memberId, () => database.listProjectsForMember(memberId));
+  async function listRequestProjectsForMember(req, memberId) {
+    return (await getCachedRequestValue(req, "projectsForMember", memberId, async () => (await database.listProjectsForMember(memberId))));
   }
 
-  function isRequestProjectMember(req, projectId, memberId) {
-    return getCachedRequestValue(req, "projectMember", `${projectId}:${memberId}`, () => database.isProjectMember(projectId, memberId));
+  async function isRequestProjectMember(req, projectId, memberId) {
+    return (await getCachedRequestValue(req, "projectMember", `${projectId}:${memberId}`, async () => (await database.isProjectMember(projectId, memberId))));
   }
 
-  function isRequestProjectCoordinator(req, projectId, memberId) {
-    return getCachedRequestValue(req, "projectCoordinator", `${projectId}:${memberId}`, () => database.isProjectCoordinator(projectId, memberId));
+  async function isRequestProjectCoordinator(req, projectId, memberId) {
+    return (await getCachedRequestValue(req, "projectCoordinator", `${projectId}:${memberId}`, async () => (await database.isProjectCoordinator(projectId, memberId))));
   }
 
-  function countUnreadChatConversationsCached(userId) {
+  async function countUnreadChatConversationsCached(userId) {
     const cacheKey = String(userId);
     const now = Date.now();
     const cached = unreadConversationCache.get(cacheKey);
@@ -281,7 +291,7 @@ function createApp() {
     if (unreadConversationCache.size > 1000) {
       unreadConversationCache.clear();
     }
-    const value = database.countUnreadChatConversationsForUser(userId);
+    const value = (await database.countUnreadChatConversationsForUser(userId));
     unreadConversationCache.set(cacheKey, { value, createdAt: now });
     return value;
   }
@@ -292,12 +302,27 @@ function createApp() {
     }
   }
 
+  async function getCachedInventoryDashboard() {
+    const now = Date.now();
+    if (inventoryDashboardCache && now - inventoryDashboardCache.createdAt < inventoryDashboardCacheTtlMs) {
+      return inventoryDashboardCache.value;
+    }
+    const value = (await database.getInventoryDashboardData());
+    inventoryDashboardCache = { value, createdAt: now };
+    return value;
+  }
+
+  function invalidateInventoryDashboardCache() {
+    inventoryDashboardCache = null;
+  }
+
   const app = express();
+  require("./asyncHttp").installAsyncHandlers(app);
   app.set("trust proxy", 1);
   app.set("view engine", "html");
 
   app.use("/static", express.static(config.staticDir, {
-    maxAge: config.nodeEnv === "production" ? 300000 : 0,
+    maxAge: config.nodeEnv === "production" ? "1d" : 0,
   }));
 
   app.get("/healthz", (req, res) => {
@@ -342,19 +367,22 @@ app.use(
   app.use(express.urlencoded({ extended: true }));
   app.use(express.json());
   app.use(requestContextMiddleware);
-  if (ENABLE_REQUEST_LOGS) {
+  if (ENABLE_REQUEST_LOGS || ENABLE_PERFORMANCE_LOGS) {
     app.use((req, res, next) => {
       const startedAt = Date.now();
       res.on("finish", () => {
         const elapsedMs = Date.now() - startedAt;
-        console.log(
-          `[http] ${req.method} ${req.originalUrl || req.url} -> ${res.statusCode} (${elapsedMs}ms)`,
-        );
+        const shouldLog = ENABLE_REQUEST_LOGS || elapsedMs >= SLOW_REQUEST_MS;
+        if (shouldLog) {
+          console.log(
+            `[http] ${req.method} ${req.originalUrl || req.url} -> ${res.statusCode} (${elapsedMs}ms)`,
+          );
+        }
       });
       next();
     });
   }
-  app.use((req, res, next) => {
+  app.use(async (req, res, next) => {
     ensureCsrfToken(req);
     req.flash = (category, message) => addFlash(req, category, message);
     const sessionExpiresAt = Number(req.session?.authExpiresAt || 0);
@@ -364,7 +392,7 @@ app.use(
       req.flash("info", "Sua sessão expirou. Faça login novamente.");
     }
     req.currentUser = req.session?.userId
-      ? getRequestUserById(req, req.session.userId)
+      ? (await getRequestUserById(req, req.session.userId))
       : null;
     if (req.currentUser && !req.currentUser.is_active) {
       req.session.userId = null;
@@ -376,7 +404,7 @@ app.use(
     res.locals.currentUser = req.currentUser;
     res.locals.isAdmin = Boolean(req.currentUser?.is_admin);
     res.locals.unreadMessageConversations = req.currentUser
-      ? countUnreadChatConversationsCached(req.currentUser.id)
+      ? (await countUnreadChatConversationsCached(req.currentUser.id))
       : 0;
     res.locals.currentMember = null;
     res.locals.flashMessages = consumeFlashes(req);
@@ -535,7 +563,7 @@ function requireAuth(req, res, next) {
 
   // DETALHE: Resolve membro atual a partir da sessao e cacheia resultado no request.
 
-  function getCurrentMember(req) {
+  async function getCurrentMember(req) {
     if (req.currentMemberResolved) {
       return req.currentMember || null;
     }
@@ -547,7 +575,7 @@ function requireAuth(req, res, next) {
     }
 
     if (req.currentUser.member_id) {
-      const linkedMember = getRequestMemberById(req, req.currentUser.member_id);
+      const linkedMember = (await getRequestMemberById(req, req.currentUser.member_id));
       if (linkedMember) {
         req.currentMember = linkedMember;
         if (req.res?.locals) {
@@ -557,8 +585,8 @@ function requireAuth(req, res, next) {
       }
     }
 
-    const fromName = getRequestMemberByName(req, req.currentUser.name);
-    const fromUsername = getRequestMemberByName(req, req.currentUser.username);
+    const fromName = (await getRequestMemberByName(req, req.currentUser.name));
+    const fromUsername = (await getRequestMemberByName(req, req.currentUser.username));
     req.currentMember = fromName || fromUsername || null;
     if (req.res?.locals) {
       req.res.locals.currentMember = req.currentMember;
@@ -568,22 +596,22 @@ function requireAuth(req, res, next) {
 
   // DETALHE: Lista projetos acessiveis de acordo com perfil e vinculo de membro.
 
-  function listAccessibleProjects(req) {
+  async function listAccessibleProjects(req) {
     if (req.currentUser?.is_admin) {
-      return database.listProjectsBasic();
+      return (await database.listProjectsBasic());
     }
 
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     if (!currentMember?.is_active) {
       return [];
     }
 
-    return listRequestProjectsForMember(req, currentMember.id);
+    return (await listRequestProjectsForMember(req, currentMember.id));
   }
 
   // DETALHE: Regra de autorizacao para criacao de ata em projeto especifico.
 
-  function canCreateAtaForProject(req, project) {
+  async function canCreateAtaForProject(req, project) {
     if (!project) {
       return false;
     }
@@ -592,17 +620,17 @@ function requireAuth(req, res, next) {
       return true;
     }
 
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     if (!currentMember?.is_active) {
       return false;
     }
 
-    return isRequestProjectMember(req, project.id, currentMember.id);
+    return (await isRequestProjectMember(req, project.id, currentMember.id));
   }
 
   // DETALHE: Regra de autorizacao para manutencao de projeto (coordenador/admin).
 
-  function canManageProject(req, project) {
+  async function canManageProject(req, project) {
     if (!project) {
       return false;
     }
@@ -611,26 +639,26 @@ function requireAuth(req, res, next) {
       return true;
     }
 
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     if (!currentMember?.is_active) {
       return false;
     }
 
-    return isRequestProjectCoordinator(req, project.id, currentMember.id);
+    return (await isRequestProjectCoordinator(req, project.id, currentMember.id));
   }
 
   // DETALHE: Regra de autorizacao para editar/excluir entradas de relatorio.
 
-  function canManageReportEntry(req, reportEntry) {
+  async function canManageReportEntry(req, reportEntry) {
     if (!reportEntry?.project) {
       return false;
     }
-    return canManageProject(req, reportEntry.project);
+    return (await canManageProject(req, reportEntry.project));
   }
 
   // DETALHE: Regra de autorizacao para metas semanais por membro/projeto.
 
-  function canManageReportGoal(req, { memberId, projectId }) {
+  async function canManageReportGoal(req, { memberId, projectId }) {
     if (!memberId || !projectId) {
       return false;
     }
@@ -639,22 +667,22 @@ function requireAuth(req, res, next) {
       return true;
     }
 
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     if (!currentMember?.is_active) {
       return false;
     }
 
     if (
       currentMember.id === memberId &&
-      isRequestProjectMember(req, projectId, currentMember.id)
+      (await isRequestProjectMember(req, projectId, currentMember.id))
     ) {
       return true;
     }
 
-    return isRequestProjectCoordinator(req, projectId, currentMember.id);
+    return (await isRequestProjectCoordinator(req, projectId, currentMember.id));
   }
 
-  function canDeleteCompletedGoalFromOthers(req, goal) {
+  async function canDeleteCompletedGoalFromOthers(req, goal) {
     if (!goal?.is_completed) {
       return false;
     }
@@ -667,15 +695,15 @@ function requireAuth(req, res, next) {
       return false;
     }
 
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     if (!currentMember?.is_active) {
       return false;
     }
 
-    return isRequestProjectCoordinator(req, goal.project_id, currentMember.id);
+    return (await isRequestProjectCoordinator(req, goal.project_id, currentMember.id));
   }
 
-  function canDeleteGoalFromExecution(req, goal) {
+  async function canDeleteGoalFromExecution(req, goal) {
     if (!goal?.id || !goal?.project_id) {
       return false;
     }
@@ -684,12 +712,12 @@ function requireAuth(req, res, next) {
       return true;
     }
 
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     if (!currentMember?.is_active) {
       return false;
     }
 
-    return isRequestProjectCoordinator(req, goal.project_id, currentMember.id);
+    return (await isRequestProjectCoordinator(req, goal.project_id, currentMember.id));
   }
 
   // DETALHE: Valida token CSRF para formularios e interrompe fluxo quando invalido.
@@ -764,7 +792,7 @@ function render(res, template, data = {}) {
 
   // DETALHE: Renderiza formulario de projeto incluindo membros ativos e controle de permissao.
 
-  function renderProjectForm(res, data) {
+  async function renderProjectForm(res, data) {
     const normalizedFormData = {
       name: "",
       primaryColor: DEFAULT_PROJECT_COLOR,
@@ -780,7 +808,7 @@ function render(res, template, data = {}) {
       formData: normalizedFormData,
       errors: data.errors || {},
       actionLabel: data.actionLabel,
-      activeMembers: database.listActiveMembers(),
+      activeMembers: (await database.listActiveMembers()),
       project: data.project || null,
       canManageProject: Boolean(data.canManageProject),
       canManageCoordinators: Boolean(data.canManageCoordinators),
@@ -789,12 +817,12 @@ function render(res, template, data = {}) {
 
   // DETALHE: Renderiza formulario de ata conforme projeto selecionado e membros disponiveis.
 
-  function renderAtaForm(req, res, data) {
-    const availableProjects = data.projects || listAccessibleProjects(req);
+  async function renderAtaForm(req, res, data) {
+    const availableProjects = data.projects || (await listAccessibleProjects(req));
     const availableProjectIds = new Set(availableProjects.map((project) => project.id));
     const selectedProjectId = parseId(data.formData.projectId);
     const selectedProject = selectedProjectId && availableProjectIds.has(selectedProjectId)
-      ? getRequestProjectById(req, selectedProjectId)
+      ? (await getRequestProjectById(req, selectedProjectId))
       : null;
     const selectedProjectMembers = selectedProject
       ? selectedProject.active_members
@@ -817,17 +845,20 @@ function render(res, template, data = {}) {
 
   // DETALHE: Renderiza tela de relatorios com filtros, resumo, formulario e lista de entradas.
 
-  function renderReportPage(req, res, data = {}) {
-    database.applySemiannualMemberWarningCycle();
-    const currentMember = getCurrentMember(req);
+  async function renderReportPage(req, res, data = {}) {
+    if (Date.now() - warningCycleLastCheckedAt >= warningCycleCheckIntervalMs) {
+      warningCycleLastCheckedAt = Date.now();
+      (await database.applySemiannualMemberWarningCycle());
+    }
+    const currentMember = (await getCurrentMember(req));
     const currentWeekStart = getCurrentWeekStartDate();
     const selectedNoteWeekStart = normalizeWeekStartDate(req.query.note_week_start) || currentWeekStart;
     const nowSql = toSqlDateTime(new Date());
     if (Date.now() - plannerLifecycleLastCheckedAt >= plannerLifecycleCheckIntervalMs) {
       plannerLifecycleLastCheckedAt = Date.now();
-      database.refreshPlannerTaskLifecycle({ graceDays: 2 });
+      (await database.refreshPlannerTaskLifecycle({ graceDays: 1 }));
     }
-    const membersSummary = database.listReportMembersSummary();
+    const membersSummary = (await database.listReportMembersSummary());
     const requestedMemberId = parseId(data.selectedMemberId || req.query.member_id);
     const selectedMemberId =
       requestedMemberId ||
@@ -838,24 +869,24 @@ function render(res, template, data = {}) {
 
     const selectedMember =
       selectedMemberId && membersSummary.some((member) => member.id === selectedMemberId)
-        ? getRequestMemberById(req, selectedMemberId)
+        ? (await getRequestMemberById(req, selectedMemberId))
         : null;
     const selectedMemberWarningState = selectedMember
-      ? database.getMemberWarningState(selectedMember.id)
+      ? (await database.getMemberWarningState(selectedMember.id))
       : null;
     if (selectedMember && selectedMemberWarningState) {
       Object.assign(selectedMember, selectedMemberWarningState);
     }
     const canManageWarnings = Boolean(
       req.currentUser?.id
-      && database.isUserMemberOfProjectName(req.currentUser.id, "Administrativo"),
+      && (await database.isUserMemberOfProjectName(req.currentUser.id, "Administrativo")),
     );
     const tutorFortnightNote = (req.currentUser?.role === "tutor" && selectedMember)
-      ? database.getReportFortnightTutorNote({
+      ? (await database.getReportFortnightTutorNote({
         tutorUserId: req.currentUser.id,
         memberId: selectedMember.id,
         weekStart: selectedNoteWeekStart,
-      })
+      }))
       : null;
     const canWriteOwnFortnightComplement = Boolean(
       selectedMember
@@ -864,30 +895,29 @@ function render(res, template, data = {}) {
       && req.currentUser?.role !== "tutor",
     );
     const memberFortnightNote = canWriteOwnFortnightComplement
-      ? database.getReportFortnightMemberNote({
+      ? (await database.getReportFortnightMemberNote({
         memberId: selectedMember.id,
         weekStart: selectedNoteWeekStart,
-      })
+      }))
       : null;
     const defaultTutorUser = canWriteOwnFortnightComplement
-      ? (database.listUsers().find((user) => user.role === "tutor") || null)
+      ? ((await database.listUsers()).find((user) => user.role === "tutor") || null)
       : null;
     const isSelectedFortnightClosed = Boolean(selectedMember && selectedNoteWeekStart && (
       String(selectedNoteWeekStart) < String(currentWeekStart)
     ));
     const requestedProjectId = parseId(data.selectedProjectId || req.query.project_id);
     const currentMemberProjectList = currentMember?.is_active
-      ? listRequestProjectsForMember(req, currentMember.id)
+      ? (await listRequestProjectsForMember(req, currentMember.id))
       : [];
     const coordinatorProjectIds = currentMember?.is_active
       ? new Set(
-          currentMemberProjectList
-            .filter((project) => isRequestProjectCoordinator(req, project.id, currentMember.id))
+          (await asyncArray.filter(currentMemberProjectList, async (project) => (await isRequestProjectCoordinator(req, project.id, currentMember.id))))
             .map((project) => project.id),
         )
       : new Set();
     const reportProjectOptions = selectedMember
-      ? listRequestProjectsForMember(req, selectedMember.id).map((project) => ({
+      ? (await listRequestProjectsForMember(req, selectedMember.id)).map((project) => ({
           ...project,
           can_create_for_others: Boolean(
             req.currentUser?.is_admin
@@ -901,20 +931,20 @@ function render(res, template, data = {}) {
       : null;
 
     const reportGoals = selectedMember
-      ? database.listReportWeekGoalsForMember(selectedMember.id, {
+      ? (await asyncArray.map((await database.listReportWeekGoalsForMember(selectedMember.id, {
           projectId: selectedProjectId || null,
           currentWeekStart,
           nowSql,
           limit: 400,
-        }).map((goal) => ({
+        })), async (goal) => ({
           ...goal,
-          can_manage: canManageReportGoal(req, {
+          can_manage: (await canManageReportGoal(req, {
             memberId: goal.member_id,
             projectId: goal.project_id,
-          }),
-          can_delete_completed: canDeleteCompletedGoalFromOthers(req, goal),
-          can_delete_from_execution: canDeleteGoalFromExecution(req, goal),
-        }))
+          })),
+          can_delete_completed: (await canDeleteCompletedGoalFromOthers(req, goal)),
+          can_delete_from_execution: (await canDeleteGoalFromExecution(req, goal)),
+        })))
       : [];
     const pendingGoals = reportGoals.filter((goal) => !goal.is_completed);
     const completedGoals = reportGoals
@@ -944,20 +974,20 @@ function render(res, template, data = {}) {
       selectedMember && currentMember?.is_active
       && reportProjectOptions.some((project) => coordinatorProjectIds.has(project.id)),
     );
-    const createGoalProjectOptions = (() => {
+    const createGoalProjectOptions = await (async () => {
       if (!currentMember?.is_active && !req.currentUser?.is_admin) {
         return [];
       }
       const baseProjects = req.currentUser?.is_admin
-        ? database.listProjectsBasic()
+        ? (await database.listProjectsBasic())
         : currentMemberProjectList;
-      return baseProjects.map((project) => ({
+      return (await asyncArray.map(baseProjects, async (project) => ({
         ...project,
         can_create_for_others: Boolean(
           req.currentUser?.is_admin
-          || (currentMember?.is_active && isRequestProjectMember(req, project.id, currentMember.id)),
+          || (currentMember?.is_active && (await isRequestProjectMember(req, project.id, currentMember.id))),
         ),
-      }));
+      })));
     })();
     const canUseAdvancedGoalCreateForm = Boolean(
       req.currentUser?.is_admin
@@ -972,16 +1002,16 @@ function render(res, template, data = {}) {
       ),
     );
     const deletionLogs = selectedMember
-      ? database.listReportWeekGoalDeletionLogsForMember(selectedMember.id, {
+      ? (await database.listReportWeekGoalDeletionLogsForMember(selectedMember.id, {
           projectId: selectedProjectId || null,
           limit: 30,
-        })
+        }))
       : [];
     const taskAuditLogs = selectedMember
-      ? database.listTaskAuditLogsForMember(selectedMember.id, {
+      ? (await database.listTaskAuditLogsForMember(selectedMember.id, {
           projectId: selectedProjectId || null,
           limit: 80,
-        })
+        }))
       : [];
     const goalsSummary = reportGoals.reduce(
       (summary, goal) => {
@@ -1015,7 +1045,7 @@ function render(res, template, data = {}) {
       selectedProjectId: selectedProjectId || "",
       selectedMember,
       canManageWarnings,
-      warningEvents: selectedMember ? database.listMemberWarningEvents(selectedMember.id) : [],
+      warningEvents: selectedMember ? (await database.listMemberWarningEvents(selectedMember.id)) : [],
       membersSummary,
       reportProjectOptions,
       createGoalProjectOptions,
@@ -1026,10 +1056,10 @@ function render(res, template, data = {}) {
       taskAuditLogs,
       canUseWritingSpace: Boolean(req.currentUser?.is_admin || req.currentUser?.role === "tutor"),
       writingGeneralEntries: req.currentUser?.is_admin
-        ? database.listWritingGeneralEntries()
+        ? (await database.listWritingGeneralEntries())
         : [],
       writingTutorPrivateEntries: req.currentUser?.role === "tutor"
-        ? database.listWritingTutorPrivateEntries(req.currentUser.id)
+        ? (await database.listWritingTutorPrivateEntries(req.currentUser.id))
         : [],
       tutorFortnightNote,
       memberFortnightNote,
@@ -1088,7 +1118,7 @@ function render(res, template, data = {}) {
 
   // DETALHE: Renderiza dashboard do almoxarifado com estado atual de abas e formularios.
 
-  function renderAlmox(res, data = {}) {
+  async function renderAlmox(res, data = {}) {
     const activeTab = normalizeAlmoxTab(data.activeTab);
     const inventoryEditOpenId = parseId(data.inventoryEditOpenId);
     const inventoryEditFormData = data.inventoryEditFormData || {};
@@ -1100,16 +1130,16 @@ function render(res, template, data = {}) {
     const needsCatalog = activeTab === "manage";
     const needsRequests = activeTab === "requests";
     const needsLoans = activeTab === "borrowed";
-    const rawInventoryItems = needsAllItems ? database.listInventoryItems() : [];
+    const rawInventoryItems = needsAllItems ? (await database.listInventoryItems()) : [];
     const stockItems = needsAllItems || needsStockItems
       ? (needsAllItems
           ? rawInventoryItems.filter((item) => item.item_type === "stock")
-          : database.listInventoryItems({ type: "stock" }))
+          : (await database.listInventoryItems({ type: "stock" })))
       : [];
     const patrimonyItems = needsAllItems || needsPatrimonyItems
       ? (needsAllItems
           ? rawInventoryItems.filter((item) => item.item_type === "patrimony")
-          : database.listInventoryItems({ type: "patrimony" }))
+          : (await database.listInventoryItems({ type: "patrimony" })))
       : [];
     const inventoryItems = rawInventoryItems.map((item) => ({
       ...item,
@@ -1151,16 +1181,16 @@ function render(res, template, data = {}) {
       title: "Almoxarifado",
       activeSection: "almox",
       activeTab,
-      dashboard: needsDashboard ? database.getInventoryDashboardData() : emptyDashboard,
+      dashboard: needsDashboard ? await getCachedInventoryDashboard() : emptyDashboard,
       inventoryItems,
       stockItems,
       patrimonyItems,
-      categories: needsCatalog ? database.listInventoryCategories() : [],
-      locations: needsCatalog ? database.listInventoryLocations() : [],
-      requests: needsRequests ? database.listInventoryRequests() : [],
-      activeLoans: needsLoans ? database.listInventoryLoans({ status: "active" }) : [],
-      returnedLoans: needsLoans ? database.listInventoryLoans({ status: "returned", limit: 12 }) : [],
-      overdueLoans: needsLoans ? database.listInventoryLoans({ status: "overdue" }) : [],
+      categories: needsCatalog ? (await database.listInventoryCategories()) : [],
+      locations: needsCatalog ? (await database.listInventoryLocations()) : [],
+      requests: needsRequests ? (await database.listInventoryRequests()) : [],
+      activeLoans: needsLoans ? (await database.listInventoryLoans({ status: "active" })) : [],
+      returnedLoans: needsLoans ? (await database.listInventoryLoans({ status: "returned", limit: 12 })) : [],
+      overdueLoans: needsLoans ? (await database.listInventoryLoans({ status: "overdue" })) : [],
       itemFormData: {
         name: "",
         itemType: "stock",
@@ -1203,10 +1233,10 @@ function render(res, template, data = {}) {
 
   // DETALHE: Renderiza central de manutencao de usuarios com criacao, vinculo, senha e exclusao.
 
-  function renderUserMaintenance(res, data = {}) {
-    const users = database.listUsers();
-    const members = database.listActiveMembers();
-    const projects = database.listProjectsWithMembers();
+  async function renderUserMaintenance(res, data = {}) {
+    const users = (await database.listUsers());
+    const members = (await database.listActiveMembers());
+    const projects = (await database.listProjectsWithMembers());
     const adminUsers = users.filter((user) => user.is_admin);
     const commonUsers = users.filter((user) => !user.is_admin);
 
@@ -1279,6 +1309,13 @@ function render(res, template, data = {}) {
 
   // SECAO: rotas modularizadas por dominio (auth, relatorios, membros e projetos).
 
+  app.use(["/almoxarifado", "/manutencao-usuarios"], (req, res, next) => {
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+      invalidateInventoryDashboardCache();
+    }
+    next();
+  });
+
   const sharedRouteContext = {
     app,
     path,
@@ -1309,6 +1346,7 @@ function render(res, template, data = {}) {
     syncReportWeekGoalFromPlannerTask: database.syncReportWeekGoalFromPlannerTask,
     notificationService,
     invalidateUnreadChatConversationCache,
+    invalidateInventoryDashboardCache,
     canManageProject,
     canCreateAtaForProject,
     canManageReportGoal,

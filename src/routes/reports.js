@@ -1,3 +1,4 @@
+const asyncArray = require("../asyncArray");
 /*
  * ARQUIVO: src/routes/reports.js
  * FUNCAO: registra rotas de relatorios quinzenais e exportacao mensal em PDF.
@@ -71,20 +72,20 @@ function registerReportRoutes(ctx) {
     return requestedWith === "xmlhttprequest" || acceptHeader.includes("application/json");
   }
 
-  app.get("/relatorios", requireAuth, (req, res) => {
-    return renderReportPage(req, res);
+  app.get("/relatorios", requireAuth, async (req, res) => {
+    return (await renderReportPage(req, res));
   });
 
-  app.post("/relatorios/warnings/:memberId/update", requireAuth, (req, res) => {
+  app.post("/relatorios/warnings/:memberId/update", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
-    if (!database.isUserMemberOfProjectName(req.currentUser.id, "Administrativo")) {
+    if (!(await database.isUserMemberOfProjectName(req.currentUser.id, "Administrativo"))) {
       req.flash("warning", "Sem permissao para alterar advertencias.");
       return res.redirect("/relatorios#report-goals-panel");
     }
     const memberId = parseId(req.params.memberId);
-    const member = memberId ? database.getMemberById(memberId) : null;
+    const member = memberId ? (await database.getMemberById(memberId)) : null;
     if (!member) {
       req.flash("warning", "Membro invalido.");
       return res.redirect("/relatorios");
@@ -92,57 +93,57 @@ function registerReportRoutes(ctx) {
     const warningAction = String(req.body.warning_action || "").trim().toLowerCase();
     let state;
     try {
-      state = database.mutateMemberWarning({
+      state = (await database.mutateMemberWarning({
         memberId: member.id,
         actorUserId: req.currentUser.id,
         action: warningAction,
         warningId: parseId(req.body.warning_id),
         note: req.body.warning_note,
-      });
+      }));
     } catch (error) {
       if (!error.warningValidation) throw error;
       req.flash("warning", error.message);
       return res.redirect(`/relatorios?member_id=${member.id}#report-goals-panel`);
     }
     if (state.changed && Number(state.previous_count || 0) < 3 && state.warning_count === 3) {
-      database.createWarningBroadcastForMember(member);
+      (await database.createWarningBroadcastForMember(member));
     }
     req.flash("success", "Advertencias atualizadas.");
     return res.redirect(`/relatorios?member_id=${member.id}&warnings=1#report-goals-panel`);
   });
 
-  app.post("/relatorios/warnings/:memberId/restriction/start", requireAuth, (req, res) => {
+  app.post("/relatorios/warnings/:memberId/restriction/start", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
-    if (!database.isUserMemberOfProjectName(req.currentUser.id, "Administrativo")) {
+    if (!(await database.isUserMemberOfProjectName(req.currentUser.id, "Administrativo"))) {
       req.flash("warning", "Sem permissao para iniciar acompanhamento.");
       return res.redirect("/relatorios#report-goals-panel");
     }
     const memberId = parseId(req.params.memberId);
-    const member = memberId ? database.getMemberById(memberId) : null;
+    const member = memberId ? (await database.getMemberById(memberId)) : null;
     if (!member) {
       req.flash("warning", "Membro invalido.");
       return res.redirect("/relatorios");
     }
-    const state = database.getMemberWarningState(member.id);
+    const state = (await database.getMemberWarningState(member.id));
     if (state.warning_count !== 3) {
       req.flash("warning", "O acompanhamento de 365 dias exige 3 advertencias.");
       return res.redirect(`/relatorios?member_id=${member.id}#report-goals-panel`);
     }
-    database.startMemberWarningRestriction({
+    (await database.startMemberWarningRestriction({
       memberId: member.id,
       actorUserId: req.currentUser.id,
-    });
+    }));
     req.flash("success", "Acompanhamento de 365 dias iniciado.");
     return res.redirect(`/relatorios?member_id=${member.id}#report-goals-panel`);
   });
 
   app.get("/relatorios/monthly/pdf", requireAuth, async (req, res) => {
     const requestedMemberId = parseId(req.query.member_id);
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     const targetMemberId = requestedMemberId || currentMember?.id || null;
-    const targetMember = targetMemberId ? database.getMemberById(targetMemberId) : null;
+    const targetMember = targetMemberId ? (await database.getMemberById(targetMemberId)) : null;
     const monthKey = normalizeMonthKey(req.query.month) || getCurrentMonthKeyInSaoPaulo();
 
     if (!targetMember) {
@@ -161,14 +162,14 @@ function registerReportRoutes(ctx) {
     }
 
     try {
-      const goals = database.listReportMonthGoalsForMember(targetMember.id, {
+      const goals = (await database.listReportMonthGoalsForMember(targetMember.id, {
         monthKey,
         limit: 2500,
-      });
-      const memberFortnightNotes = database.listReportMonthMemberNotesForPdf(targetMember.id, {
+      }));
+      const memberFortnightNotes = (await database.listReportMonthMemberNotesForPdf(targetMember.id, {
         monthKey,
         limit: 200,
-      });
+      }));
       const pdf = await generateMonthlyReportPdf({
         member: targetMember,
         monthKey,
@@ -226,7 +227,7 @@ function registerReportRoutes(ctx) {
 
   // DETALHE: Rota POST /relatorios/goals/create: cria meta quinzenal para membro/projeto selecionados.
 
-  app.post("/relatorios/goals/create", requireAuth, (req, res) => {
+  app.post("/relatorios/goals/create", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -266,14 +267,14 @@ function registerReportRoutes(ctx) {
     }
 
     const selectedMember = selectedMemberId
-      ? database.getMemberById(selectedMemberId)
+      ? (await database.getMemberById(selectedMemberId))
       : null;
 
-    const project = projectId ? database.getProjectById(projectId) : null;
+    const project = projectId ? (await database.getProjectById(projectId)) : null;
     if (!project) {
       goalFormErrors.projectId = ["Selecione um projeto valido."];
     } else {
-      const invalidMemberIds = selectedMemberIds.filter((memberId) => !database.isProjectMember(project.id, memberId));
+      const invalidMemberIds = (await asyncArray.filter(selectedMemberIds, async (memberId) => !(await database.isProjectMember(project.id, memberId))));
       if (invalidMemberIds.length > 0) {
         goalFormErrors.projectId = ["Um ou mais membros selecionados nao participam do projeto."];
       }
@@ -292,16 +293,16 @@ function registerReportRoutes(ctx) {
       }
     }
 
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     const canCreateWithinProject = Boolean(
       currentMember?.is_active
       && project
-      && database.isProjectMember(project.id, currentMember.id),
+      && (await database.isProjectMember(project.id, currentMember.id)),
     );
     const canCreateAsCoordinator = Boolean(
       currentMember?.is_active
       && project
-      && database.isProjectCoordinator(project.id, currentMember.id),
+      && (await database.isProjectCoordinator(project.id, currentMember.id)),
     );
 
     const recurrenceEnabled = Boolean(goalFormData.recurrenceEnabled);
@@ -347,12 +348,12 @@ function registerReportRoutes(ctx) {
           errors: goalFormErrors,
         });
       }
-      return renderReportPage(req, res, {
+      return (await renderReportPage(req, res, {
         selectedMemberId: selectedMember?.id || null,
         selectedProjectId: project?.id || null,
         goalFormData,
         goalFormErrors,
-      });
+      }));
     }
 
     let createdTask = null;
@@ -362,14 +363,14 @@ function registerReportRoutes(ctx) {
         ? "in_progress"
         : "todo";
 
-      selectedMemberIds.forEach((memberId) => {
+      (await asyncArray.forEach(selectedMemberIds, async (memberId) => {
         const assignedMemberId = recurrenceEnabled && recurrenceQueue.length
           ? recurrenceQueue[0]
           : memberId;
         const recurrenceNextIndex = recurrenceEnabled && recurrenceQueue.length > 1
           ? 1
           : 0;
-        const task = database.createPlannerTask({
+        const task = (await database.createPlannerTask({
           projectId: project.id,
           assignedMemberId,
           createdByUserId: req.currentUser.id,
@@ -384,26 +385,26 @@ function registerReportRoutes(ctx) {
           recurrenceEvery: recurrenceEnabled ? recurrenceIntervalDays : null,
           recurrenceMemberQueue: recurrenceEnabled ? recurrenceQueue : null,
           recurrenceNextIndex: recurrenceEnabled ? recurrenceNextIndex : null,
-        });
+        }));
         if (!createdTask) {
           createdTask = task;
         }
         let syncedTask = task;
         if (goalFormData.isCompleted && task?.id) {
           const completedAt = toSqlDateTime(new Date());
-          syncedTask = database.updatePlannerTaskCompletion({
+          syncedTask = (await database.updatePlannerTaskCompletion({
             id: task.id,
             isCompleted: true,
             completedAt,
             updatedAt: completedAt,
             actorUserId: req.currentUser.id,
-          }) || task;
+          })) || task;
         }
-        database.syncReportWeekGoalFromPlannerTask(syncedTask, {
+        (await database.syncReportWeekGoalFromPlannerTask(syncedTask, {
           createdByUserId: req.currentUser.id,
-        });
+        }));
         createdGoalsCount += 1;
-      });
+      }));
 
       if (!wantsJson) {
         req.flash(
@@ -422,12 +423,12 @@ function registerReportRoutes(ctx) {
         });
       }
       req.flash("danger", `Erro ao criar meta quinzenal: ${error.message}`);
-      return renderReportPage(req, res, {
+      return (await renderReportPage(req, res, {
         selectedMemberId: selectedMember?.id || null,
         selectedProjectId: project?.id || null,
         goalFormData,
         goalFormErrors,
-      });
+      }));
     }
 
     const redirectUrl = `/relatorios${buildReportsQuery({
@@ -448,13 +449,13 @@ function registerReportRoutes(ctx) {
     );
   });
 
-  app.post("/relatorios/goals/:id/update", requireAuth, (req, res) => {
+  app.post("/relatorios/goals/:id/update", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
 
     const goalId = parseId(req.params.id);
-    const goal = goalId ? database.getReportWeekGoalById(goalId) : null;
+    const goal = goalId ? (await database.getReportWeekGoalById(goalId)) : null;
     const returnProjectId = parseId(req.body.return_project_id);
     const wantsJson = wantsJsonResponse(req);
 
@@ -477,10 +478,10 @@ function registerReportRoutes(ctx) {
       return sendGoalUpdateError(404, "Meta quinzenal não encontrada.");
     }
 
-    if (!canManageReportGoal(req, {
+    if (!(await canManageReportGoal(req, {
       memberId: goal.member_id,
       projectId: goal.project_id,
-    })) {
+    }))) {
       return sendGoalUpdateError(403, "Sem permissão para editar esta meta quinzenal.");
     }
 
@@ -531,11 +532,11 @@ function registerReportRoutes(ctx) {
 
     try {
       let linkedTask = goal.planner_task_id
-        ? database.getPlannerTaskById(goal.planner_task_id)
+        ? (await database.getPlannerTaskById(goal.planner_task_id))
         : null;
 
       if (!linkedTask) {
-        const createdTask = database.createPlannerTask({
+        const createdTask = (await database.createPlannerTask({
           projectId: goal.project_id,
           assignedMemberId: goal.member_id,
           createdByUserId: req.currentUser.id,
@@ -545,11 +546,11 @@ function registerReportRoutes(ctx) {
           status: isCompleted ? "done" : "todo",
           workflowState: goal.task_state === "missed" ? "missed" : "active",
           priority: "medium",
-        });
-        database.attachPlannerTaskToReportWeekGoal(goal.id, createdTask.id);
-        database.syncReportWeekGoalFromPlannerTask(createdTask, {
+        }));
+        (await database.attachPlannerTaskToReportWeekGoal(goal.id, createdTask.id));
+        (await database.syncReportWeekGoalFromPlannerTask(createdTask, {
           createdByUserId: req.currentUser.id,
-        });
+        }));
         linkedTask = createdTask;
       }
 
@@ -575,33 +576,33 @@ function registerReportRoutes(ctx) {
         && isPastEffectiveDeadline,
       );
       if (goalAction === "done_late" && !isPastEffectiveDeadline) {
-        updatedTask = database.updatePlannerTaskCompletion({
+        updatedTask = (await database.updatePlannerTaskCompletion({
           id: linkedTask.id,
           isCompleted: true,
           completedAt: nowSql,
           updatedAt: nowSql,
           actorUserId: req.currentUser.id,
-        });
+        }));
       } else if (goalAction === "done_late" || completedAfterDeadline) {
-        updatedTask = database.markPlannerTaskDoneLate({
+        updatedTask = (await database.markPlannerTaskDoneLate({
           id: linkedTask.id,
           actorUserId: req.currentUser.id,
           title: activity || linkedTask.title,
           description: description || linkedTask.description || goal.description || null,
           dueAt: dueAt || linkedTask.due_at,
-        });
+        }));
       } else if (goalAction === "extend_deadline") {
-        updatedTask = database.extendPlannerTaskDeadline({
+        updatedTask = (await database.extendPlannerTaskDeadline({
           id: linkedTask.id,
           dueAt,
           actorUserId: req.currentUser.id,
           reason: extensionReason || null,
-        });
+        }));
       } else {
         const nextStatus = isCompleted
           ? "done"
           : (dueAt && nowSql && dueAt <= nowSql ? "in_progress" : "todo");
-        updatedTask = database.updatePlannerTaskDetails({
+        updatedTask = (await database.updatePlannerTaskDetails({
           id: linkedTask.id,
           projectId: goal.project_id,
           assignedMemberId: goal.member_id,
@@ -610,13 +611,13 @@ function registerReportRoutes(ctx) {
           dueAt: dueAt || linkedTask.due_at,
           status: nextStatus,
           actorUserId: req.currentUser.id,
-        });
+        }));
       }
 
       if (updatedTask) {
-        database.syncReportWeekGoalFromPlannerTask(updatedTask, {
+        (await database.syncReportWeekGoalFromPlannerTask(updatedTask, {
           createdByUserId: req.currentUser.id,
-        });
+        }));
       }
 
       if (wantsJson) {
@@ -642,13 +643,13 @@ function registerReportRoutes(ctx) {
     return res.redirect(buildReturnUrl());
   });
 
-  app.post("/relatorios/goals/:id/delete", requireAuth, (req, res) => {
+  app.post("/relatorios/goals/:id/delete", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
 
     const goalId = parseId(req.params.id);
-    const goal = goalId ? database.getReportWeekGoalById(goalId) : null;
+    const goal = goalId ? (await database.getReportWeekGoalById(goalId)) : null;
     const returnProjectId = parseId(req.body.return_project_id);
     const deletionReason = String(req.body.deletion_reason || "").trim();
     const wantsJson = wantsJsonResponse(req);
@@ -672,8 +673,8 @@ function registerReportRoutes(ctx) {
       return sendGoalDeleteError(404, "Meta quinzenal não encontrada.");
     }
 
-    const canDeleteFromCompleted = canDeleteCompletedGoalFromOthers(req, goal);
-    const canDeleteFromExecution = canDeleteGoalFromExecution(req, goal);
+    const canDeleteFromCompleted = (await canDeleteCompletedGoalFromOthers(req, goal));
+    const canDeleteFromExecution = (await canDeleteGoalFromExecution(req, goal));
     const isMissedGoal = goal.task_state === "missed";
 
     if (!canDeleteFromCompleted && !canDeleteFromExecution) {
@@ -686,15 +687,15 @@ function registerReportRoutes(ctx) {
 
     try {
       if (goal.planner_task_id) {
-        const linkedTask = database.getPlannerTaskById(goal.planner_task_id);
+        const linkedTask = (await database.getPlannerTaskById(goal.planner_task_id));
         if (linkedTask) {
-          database.deletePlannerTask(linkedTask.id, {
+          (await database.deletePlannerTask(linkedTask.id, {
             actorUserId: req.currentUser.id,
             reportGoalId: goal.id,
-          });
+          }));
         }
       }
-      database.deleteReportWeekGoalWithAudit(goal.id, req.currentUser.id, deletionReason);
+      (await database.deleteReportWeekGoalWithAudit(goal.id, req.currentUser.id, deletionReason));
       if (wantsJson) {
         return res.json({
           ok: true,
@@ -717,7 +718,7 @@ function registerReportRoutes(ctx) {
     return res.redirect(buildDeleteReturnUrl());
   });
 
-  app.post("/relatorios/writing/geral/create", requireAuth, (req, res) => {
+  app.post("/relatorios/writing/geral/create", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -734,11 +735,11 @@ function registerReportRoutes(ctx) {
 
     try {
       const generatedTitle = `Registro ${new Date().toLocaleString("pt-BR")}`;
-      database.createWritingGeneralEntry({
+      (await database.createWritingGeneralEntry({
         title: generatedTitle,
         content,
         authorUserId: req.currentUser.id,
-      });
+      }));
       req.flash("success", "Registro geral criado com sucesso.");
     } catch (error) {
       logError(req, "Erro ao criar registro geral:", error);
@@ -747,7 +748,7 @@ function registerReportRoutes(ctx) {
     return res.redirect("/relatorios#report-writing-panel");
   });
 
-  app.post("/relatorios/writing/geral/edit/:id", requireAuth, (req, res) => {
+  app.post("/relatorios/writing/geral/edit/:id", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -764,11 +765,11 @@ function registerReportRoutes(ctx) {
     }
 
     try {
-      const current = database.getWritingGeneralEntryById(entryId);
-      const updated = database.updateWritingGeneralEntry(entryId, {
+      const current = (await database.getWritingGeneralEntryById(entryId));
+      const updated = (await database.updateWritingGeneralEntry(entryId, {
         title: current?.title || `Registro ${new Date().toLocaleString("pt-BR")}`,
         content,
-      });
+      }));
       if (!updated) {
         req.flash("warning", "Registro geral não encontrado.");
       } else {
@@ -781,7 +782,7 @@ function registerReportRoutes(ctx) {
     return res.redirect("/relatorios#report-writing-panel");
   });
 
-  app.post("/relatorios/writing/geral/delete/:id", requireAuth, (req, res) => {
+  app.post("/relatorios/writing/geral/delete/:id", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -797,7 +798,7 @@ function registerReportRoutes(ctx) {
     }
 
     try {
-      const deleted = database.deleteWritingGeneralEntry(entryId);
+      const deleted = (await database.deleteWritingGeneralEntry(entryId));
       if (!deleted) {
         req.flash("warning", "Registro geral não encontrado.");
       } else {
@@ -810,7 +811,7 @@ function registerReportRoutes(ctx) {
     return res.redirect("/relatorios#report-writing-panel");
   });
 
-  app.post("/relatorios/writing/tutor/create", requireAuth, (req, res) => {
+  app.post("/relatorios/writing/tutor/create", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -827,11 +828,11 @@ function registerReportRoutes(ctx) {
     }
 
     try {
-      database.createWritingTutorPrivateEntry({
+      (await database.createWritingTutorPrivateEntry({
         title,
         content,
         tutorUserId: req.currentUser.id,
-      });
+      }));
       req.flash("success", "Anotação privada criada com sucesso.");
     } catch (error) {
       logError(req, "Erro ao criar anotação privada:", error);
@@ -840,7 +841,7 @@ function registerReportRoutes(ctx) {
     return res.redirect("/relatorios#report-writing-panel");
   });
 
-  app.post("/relatorios/writing/tutor/edit/:id", requireAuth, (req, res) => {
+  app.post("/relatorios/writing/tutor/edit/:id", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -857,14 +858,14 @@ function registerReportRoutes(ctx) {
       return res.redirect("/relatorios#report-writing-panel");
     }
 
-    const existing = database.getWritingTutorPrivateEntryById(entryId);
+    const existing = (await database.getWritingTutorPrivateEntryById(entryId));
     if (!existing || existing.tutor_user_id !== req.currentUser.id) {
       req.flash("warning", "Anotação privada não encontrada.");
       return res.redirect("/relatorios#report-writing-panel");
     }
 
     try {
-      database.updateWritingTutorPrivateEntry(entryId, { title, content });
+      (await database.updateWritingTutorPrivateEntry(entryId, { title, content }));
       req.flash("success", "Anotação privada atualizada.");
     } catch (error) {
       logError(req, "Erro ao editar anotação privada:", error);
@@ -873,7 +874,7 @@ function registerReportRoutes(ctx) {
     return res.redirect("/relatorios#report-writing-panel");
   });
 
-  app.post("/relatorios/writing/tutor/delete/:id", requireAuth, (req, res) => {
+  app.post("/relatorios/writing/tutor/delete/:id", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -888,14 +889,14 @@ function registerReportRoutes(ctx) {
       return res.redirect("/relatorios#report-writing-panel");
     }
 
-    const existing = database.getWritingTutorPrivateEntryById(entryId);
+    const existing = (await database.getWritingTutorPrivateEntryById(entryId));
     if (!existing || existing.tutor_user_id !== req.currentUser.id) {
       req.flash("warning", "Anotação privada não encontrada.");
       return res.redirect("/relatorios#report-writing-panel");
     }
 
     try {
-      database.deleteWritingTutorPrivateEntry(entryId);
+      (await database.deleteWritingTutorPrivateEntry(entryId));
       req.flash("success", "Anotação privada removida.");
     } catch (error) {
       logError(req, "Erro ao excluir anotação privada:", error);
@@ -904,7 +905,7 @@ function registerReportRoutes(ctx) {
     return res.redirect("/relatorios#report-writing-panel");
   });
 
-  app.post("/relatorios/writing/fortnight/save", requireAuth, (req, res) => {
+  app.post("/relatorios/writing/fortnight/save", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -934,46 +935,46 @@ function registerReportRoutes(ctx) {
     }
 
     try {
-      const note = database.upsertReportFortnightTutorNote({
+      const note = (await database.upsertReportFortnightTutorNote({
         tutorUserId: req.currentUser.id,
         memberId,
         weekStart,
         content,
-      });
+      }));
 
-      const memberUser = database.getUserByMemberId(memberId);
+      const memberUser = (await database.getUserByMemberId(memberId));
       if (!memberUser?.id) {
         req.flash("success", "Avaliação complementar salva.");
         req.flash("warning", "Membro sem usuário vinculado: envio ao chat não realizado.");
         return res.redirect(`/relatorios${buildReportsQuery({ memberId })}#report-writing-panel`);
       }
 
-      let conversation = database.findDirectConversationByUsers(req.currentUser.id, memberUser.id);
+      let conversation = (await database.findDirectConversationByUsers(req.currentUser.id, memberUser.id));
       if (!conversation?.id) {
-        conversation = database.createChatConversation({
+        conversation = (await database.createChatConversation({
           title: `Tutor • ${memberUser.name || memberUser.username}`,
           createdByUserId: req.currentUser.id,
           participantUserIds: [req.currentUser.id, memberUser.id],
-        });
+        }));
       }
 
       const weekLabel = String(weekStart).split("-").reverse().join("/");
-      const chatMessage = database.createChatMessage({
+      const chatMessage = (await database.createChatMessage({
         conversationId: conversation.id,
         authorUserId: req.currentUser.id,
         text: `Avaliação complementar da quinzena (${weekLabel})\n\n${note.content}`,
-      });
+      }));
       if (notificationService) {
-        notificationService.sendChatNewMessageNotification({
+        (await notificationService.sendChatNewMessageNotification({
           conversationId: conversation.id,
           messageText: chatMessage?.text || note.content,
           authorUserId: req.currentUser.id,
           sentAt: chatMessage?.sent_at || null,
-        }).catch((notifyError) => {
+        })).catch((notifyError) => {
           logError(req, "Erro ao notificar e-mail de avaliação do tutor:", notifyError);
         });
       }
-      database.markReportFortnightTutorNoteAsSentToChat(note.id, conversation.id);
+      (await database.markReportFortnightTutorNoteAsSentToChat(note.id, conversation.id));
       req.flash("success", "Avaliação salva e enviada ao chat privado.");
       return res.redirect(`/relatorios${buildReportsQuery({ memberId })}#report-writing-panel`);
     } catch (error) {
@@ -983,7 +984,7 @@ function registerReportRoutes(ctx) {
     }
   });
 
-  app.post("/relatorios/writing/fortnight/send-chat", requireAuth, (req, res) => {
+  app.post("/relatorios/writing/fortnight/send-chat", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -1000,49 +1001,49 @@ function registerReportRoutes(ctx) {
       return res.redirect("/relatorios#report-writing-panel");
     }
 
-    const note = database.getReportFortnightTutorNote({
+    const note = (await database.getReportFortnightTutorNote({
       tutorUserId: req.currentUser.id,
       memberId,
       weekStart,
-    });
+    }));
     if (!note || !String(note.content || "").trim()) {
       req.flash("warning", "Salve a avaliação complementar antes de enviar ao chat.");
       return res.redirect(`/relatorios${buildReportsQuery({ memberId })}#report-writing-panel`);
     }
 
-    const memberUser = database.getUserByMemberId(memberId);
+    const memberUser = (await database.getUserByMemberId(memberId));
     if (!memberUser?.id) {
       req.flash("warning", "Este membro não possui usuário vinculado para receber mensagens.");
       return res.redirect(`/relatorios${buildReportsQuery({ memberId })}#report-writing-panel`);
     }
 
     try {
-      let conversation = database.findDirectConversationByUsers(req.currentUser.id, memberUser.id);
+      let conversation = (await database.findDirectConversationByUsers(req.currentUser.id, memberUser.id));
       if (!conversation?.id) {
-        conversation = database.createChatConversation({
+        conversation = (await database.createChatConversation({
           title: `Tutor • ${memberUser.name || memberUser.username}`,
           createdByUserId: req.currentUser.id,
           participantUserIds: [req.currentUser.id, memberUser.id],
-        });
+        }));
       }
 
       const weekLabel = String(weekStart).split("-").reverse().join("/");
-      const chatMessage = database.createChatMessage({
+      const chatMessage = (await database.createChatMessage({
         conversationId: conversation.id,
         authorUserId: req.currentUser.id,
         text: `Avaliação complementar da quinzena (${weekLabel})\n\n${note.content}`,
-      });
+      }));
       if (notificationService) {
-        notificationService.sendChatNewMessageNotification({
+        (await notificationService.sendChatNewMessageNotification({
           conversationId: conversation.id,
           messageText: chatMessage?.text || note.content,
           authorUserId: req.currentUser.id,
           sentAt: chatMessage?.sent_at || null,
-        }).catch((notifyError) => {
+        })).catch((notifyError) => {
           logError(req, "Erro ao notificar e-mail de avaliação do tutor:", notifyError);
         });
       }
-      database.markReportFortnightTutorNoteAsSentToChat(note.id, conversation.id);
+      (await database.markReportFortnightTutorNoteAsSentToChat(note.id, conversation.id));
       req.flash("success", "Avaliação enviada ao chat privado com sucesso.");
       return res.redirect(`/relatorios${buildReportsQuery({ memberId })}#report-writing-panel`);
     } catch (error) {
@@ -1052,7 +1053,7 @@ function registerReportRoutes(ctx) {
     }
   });
 
-  app.post("/relatorios/writing/member/save", requireAuth, (req, res) => {
+  app.post("/relatorios/writing/member/save", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -1061,7 +1062,7 @@ function registerReportRoutes(ctx) {
       return res.redirect("/relatorios#report-writing-panel");
     }
 
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     const memberId = parseId(req.body.member_id);
     const currentWeekStart = getCurrentWeekStartDate();
     const weekStart = normalizeWeekStartInput(req.body.week_start, currentWeekStart);
@@ -1083,14 +1084,14 @@ function registerReportRoutes(ctx) {
     }
 
     try {
-      const tutorUser = database.listUsers().find((user) => user.role === "tutor") || null;
-      database.upsertReportFortnightMemberNote({
+      const tutorUser = (await database.listUsers()).find((user) => user.role === "tutor") || null;
+      (await database.upsertReportFortnightMemberNote({
         memberId,
         authorUserId: req.currentUser.id,
         targetTutorUserId: tutorUser?.id || null,
         weekStart,
         content,
-      });
+      }));
 
       req.flash("success", "Complemento salvo. Ele sera incluido no relatorio em PDF.");
       return res.redirect(`/relatorios${buildReportsQuery({ memberId })}#report-writing-panel`);

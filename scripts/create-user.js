@@ -25,7 +25,7 @@ function parseArgument(flag) {
 // SECAO: fluxo principal interativo para criacao de usuario no banco local.
 
 async function main() {
-  database.ensureSchema();
+  (await database.ensureSchema());
 
   let username = parseArgument("--username");
   let password = parseArgument("--password");
@@ -76,18 +76,18 @@ async function main() {
     role = "admin";
   }
 
-  if (database.getUserByUsername(username)) {
+  if ((await database.getUserByUsername(username))) {
     console.error(`Erro: Usuário "${username}" já existe.`);
     process.exitCode = 1;
     return;
   }
 
   const passwordHash = bcrypt.hashSync(password, 12);
-  database.createUser(username, passwordHash, { name, role, email });
+  (await database.createUser(username, passwordHash, { name, role, email }));
   console.log(`Usuário "${username}" criado com sucesso como ${role}.`);
 }
 
 main().catch((error) => {
   console.error("Erro ao criar usuário:", error);
   process.exitCode = 1;
-});
+}).finally(() => require("../src/postgres").closePool());

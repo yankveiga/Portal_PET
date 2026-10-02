@@ -45,15 +45,15 @@ function registerWritingRoutes(ctx) {
     return errors;
   }
 
-  function renderWritingPage(req, res, data = {}) {
+  async function renderWritingPage(req, res, data = {}) {
     const isTutor = canUseTutorPrivateSpace(req);
     return render(res, "writing/index.html", {
       title: "Espaços de Escrita",
       activeSection: "writing",
       isTutor,
-      generalEntries: database.listWritingGeneralEntries(),
+      generalEntries: (await database.listWritingGeneralEntries()),
       tutorEntries: isTutor
-        ? database.listWritingTutorPrivateEntries(req.currentUser.id)
+        ? (await database.listWritingTutorPrivateEntries(req.currentUser.id))
         : [],
       generalFormData: {
         title: "",
@@ -72,11 +72,11 @@ function registerWritingRoutes(ctx) {
     });
   }
 
-  app.get("/espacos-escrita", requireAuth, requireAdminPage, (req, res) => {
-    return renderWritingPage(req, res);
+  app.get("/espacos-escrita", requireAuth, requireAdminPage, async (req, res) => {
+    return (await renderWritingPage(req, res));
   });
 
-  app.post("/espacos-escrita/geral/create", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/espacos-escrita/geral/create", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -84,24 +84,24 @@ function registerWritingRoutes(ctx) {
     const generalFormData = parseEntryFormData(req.body);
     const generalErrors = validateEntryFormData(generalFormData);
     if (Object.keys(generalErrors).length) {
-      return renderWritingPage(req, res, { generalFormData, generalErrors });
+      return (await renderWritingPage(req, res, { generalFormData, generalErrors }));
     }
 
     try {
-      database.createWritingGeneralEntry({
+      (await database.createWritingGeneralEntry({
         title: generalFormData.title,
         content: generalFormData.content,
         authorUserId: req.currentUser.id,
-      });
+      }));
       req.flash("success", "Registro geral criado com sucesso.");
       return res.redirect(urlFor("writing_spaces"));
     } catch (error) {
       req.flash("danger", `Erro ao criar registro geral: ${error.message}`);
-      return renderWritingPage(req, res, { generalFormData, generalErrors });
+      return (await renderWritingPage(req, res, { generalFormData, generalErrors }));
     }
   });
 
-  app.post("/espacos-escrita/geral/edit/:id", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/espacos-escrita/geral/edit/:id", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -112,7 +112,7 @@ function registerWritingRoutes(ctx) {
       return res.redirect(urlFor("writing_spaces"));
     }
 
-    const existing = database.getWritingGeneralEntryById(entryId);
+    const existing = (await database.getWritingGeneralEntryById(entryId));
     if (!existing) {
       req.flash("warning", "Registro geral não encontrado.");
       return res.redirect(urlFor("writing_spaces"));
@@ -121,28 +121,28 @@ function registerWritingRoutes(ctx) {
     const generalFormData = parseEntryFormData(req.body);
     const generalErrors = validateEntryFormData(generalFormData);
     if (Object.keys(generalErrors).length) {
-      return renderWritingPage(req, res, {
+      return (await renderWritingPage(req, res, {
         generalFormData,
         generalErrors,
         generalEditingId: entryId,
-      });
+      }));
     }
 
     try {
-      database.updateWritingGeneralEntry(entryId, generalFormData);
+      (await database.updateWritingGeneralEntry(entryId, generalFormData));
       req.flash("success", "Registro geral atualizado com sucesso.");
       return res.redirect(urlFor("writing_spaces"));
     } catch (error) {
       req.flash("danger", `Erro ao atualizar registro geral: ${error.message}`);
-      return renderWritingPage(req, res, {
+      return (await renderWritingPage(req, res, {
         generalFormData,
         generalErrors,
         generalEditingId: entryId,
-      });
+      }));
     }
   });
 
-  app.post("/espacos-escrita/geral/delete/:id", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/espacos-escrita/geral/delete/:id", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -153,7 +153,7 @@ function registerWritingRoutes(ctx) {
       return res.redirect(urlFor("writing_spaces"));
     }
 
-    const deleted = database.deleteWritingGeneralEntry(entryId);
+    const deleted = (await database.deleteWritingGeneralEntry(entryId));
     if (!deleted) {
       req.flash("warning", "Registro geral não encontrado.");
       return res.redirect(urlFor("writing_spaces"));
@@ -163,7 +163,7 @@ function registerWritingRoutes(ctx) {
     return res.redirect(urlFor("writing_spaces"));
   });
 
-  app.post("/espacos-escrita/tutor/create", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/espacos-escrita/tutor/create", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -176,24 +176,24 @@ function registerWritingRoutes(ctx) {
     const tutorFormData = parseEntryFormData(req.body);
     const tutorErrors = validateEntryFormData(tutorFormData);
     if (Object.keys(tutorErrors).length) {
-      return renderWritingPage(req, res, { tutorFormData, tutorErrors });
+      return (await renderWritingPage(req, res, { tutorFormData, tutorErrors }));
     }
 
     try {
-      database.createWritingTutorPrivateEntry({
+      (await database.createWritingTutorPrivateEntry({
         title: tutorFormData.title,
         content: tutorFormData.content,
         tutorUserId: req.currentUser.id,
-      });
+      }));
       req.flash("success", "Anotação privada criada com sucesso.");
       return res.redirect(urlFor("writing_spaces"));
     } catch (error) {
       req.flash("danger", `Erro ao criar anotação privada: ${error.message}`);
-      return renderWritingPage(req, res, { tutorFormData, tutorErrors });
+      return (await renderWritingPage(req, res, { tutorFormData, tutorErrors }));
     }
   });
 
-  app.post("/espacos-escrita/tutor/edit/:id", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/espacos-escrita/tutor/edit/:id", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -209,7 +209,7 @@ function registerWritingRoutes(ctx) {
       return res.redirect(urlFor("writing_spaces"));
     }
 
-    const existing = database.getWritingTutorPrivateEntryById(entryId);
+    const existing = (await database.getWritingTutorPrivateEntryById(entryId));
     if (!existing || existing.tutor_user_id !== req.currentUser.id) {
       req.flash("warning", "Anotação privada não encontrada.");
       return res.redirect(urlFor("writing_spaces"));
@@ -218,28 +218,28 @@ function registerWritingRoutes(ctx) {
     const tutorFormData = parseEntryFormData(req.body);
     const tutorErrors = validateEntryFormData(tutorFormData);
     if (Object.keys(tutorErrors).length) {
-      return renderWritingPage(req, res, {
+      return (await renderWritingPage(req, res, {
         tutorFormData,
         tutorErrors,
         tutorEditingId: entryId,
-      });
+      }));
     }
 
     try {
-      database.updateWritingTutorPrivateEntry(entryId, tutorFormData);
+      (await database.updateWritingTutorPrivateEntry(entryId, tutorFormData));
       req.flash("success", "Anotação privada atualizada com sucesso.");
       return res.redirect(urlFor("writing_spaces"));
     } catch (error) {
       req.flash("danger", `Erro ao atualizar anotação privada: ${error.message}`);
-      return renderWritingPage(req, res, {
+      return (await renderWritingPage(req, res, {
         tutorFormData,
         tutorErrors,
         tutorEditingId: entryId,
-      });
+      }));
     }
   });
 
-  app.post("/espacos-escrita/tutor/delete/:id", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/espacos-escrita/tutor/delete/:id", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -255,13 +255,13 @@ function registerWritingRoutes(ctx) {
       return res.redirect(urlFor("writing_spaces"));
     }
 
-    const existing = database.getWritingTutorPrivateEntryById(entryId);
+    const existing = (await database.getWritingTutorPrivateEntryById(entryId));
     if (!existing || existing.tutor_user_id !== req.currentUser.id) {
       req.flash("warning", "Anotação privada não encontrada.");
       return res.redirect(urlFor("writing_spaces"));
     }
 
-    database.deleteWritingTutorPrivateEntry(entryId);
+    (await database.deleteWritingTutorPrivateEntry(entryId));
     req.flash("success", "Anotação privada removida com sucesso.");
     return res.redirect(urlFor("writing_spaces"));
   });

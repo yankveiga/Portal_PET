@@ -1,3 +1,4 @@
+const asyncArray = require("../asyncArray");
 /*
  * ARQUIVO: src/routes/projects.js
  * FUNCAO: registra rotas de listagem, criacao, edicao e exclusao de projetos.
@@ -36,40 +37,40 @@ function registerProjectRoutes(ctx) {
     return Boolean(req.currentUser && project);
   }
 
-  function isCoordinatorInAnyProject(req) {
-    const currentMember = getCurrentMember(req);
+  async function isCoordinatorInAnyProject(req) {
+    const currentMember = (await getCurrentMember(req));
     if (!currentMember?.is_active) {
       return false;
     }
 
-    const memberProjects = listRequestProjectsForMember(req, currentMember.id);
-    return memberProjects.some((project) => isRequestProjectCoordinator(req, project.id, currentMember.id));
+    const memberProjects = (await listRequestProjectsForMember(req, currentMember.id));
+    return (await asyncArray.some(memberProjects, async (project) => (await isRequestProjectCoordinator(req, project.id, currentMember.id))));
   }
 
-  function canManageCoordinatorAssignments(req, project = null) {
+  async function canManageCoordinatorAssignments(req, project = null) {
     if (req.currentUser?.is_admin) {
       return true;
     }
 
-    const currentMember = getCurrentMember(req);
+    const currentMember = (await getCurrentMember(req));
     if (!currentMember?.is_active) {
       return false;
     }
 
     if (project) {
-      return isRequestProjectCoordinator(req, project.id, currentMember.id);
+      return (await isRequestProjectCoordinator(req, project.id, currentMember.id));
     }
 
-    return isCoordinatorInAnyProject(req);
+    return (await isCoordinatorInAnyProject(req));
   }
 
-app.get("/projects", requireAuth, (req, res) => {
-    const projects = database.listProjectsWithMembers().map((project) => ({
+app.get("/projects", requireAuth, async (req, res) => {
+    const projects = (await asyncArray.map((await database.listProjectsWithMembers()), async (project) => ({
       ...project,
       can_manage: true,
       can_assign_members: canAssignMembersToProject(req, project),
-      can_create_ata_shortcut: canCreateAtaForProject(req, project),
-    }));
+      can_create_ata_shortcut: (await canCreateAtaForProject(req, project)),
+    })));
     const showProjectActions = projects.some((project) => project.can_create_ata_shortcut || project.can_assign_members);
 
     return render(res, "projects/list.html", {
@@ -82,8 +83,8 @@ app.get("/projects", requireAuth, (req, res) => {
 
   // DETALHE: Rota GET /projects/add: consulta dados necessarios e monta resposta (HTML/JSON) para a tela solicitada.
 
-  app.get("/projects/add", requireAuth, (req, res) => {
-    return renderProjectForm(res, {
+  app.get("/projects/add", requireAuth, async (req, res) => {
+    return (await renderProjectForm(res, {
       title: "Adicionar Projeto",
       actionLabel: "Adicionar",
       formData: {
@@ -95,8 +96,8 @@ app.get("/projects", requireAuth, (req, res) => {
       },
       errors: {},
       canManageProject: true,
-      canManageCoordinators: canManageCoordinatorAssignments(req),
-    });
+      canManageCoordinators: (await canManageCoordinatorAssignments(req)),
+    }));
   });
 
   // DETALHE: Inicio de bloco de rota declarada em multiplas linhas; revisar path e middlewares logo abaixo.
@@ -115,7 +116,7 @@ app.get("/projects", requireAuth, (req, res) => {
         return;
       }
 
-      const canManageCoordinators = canManageCoordinatorAssignments(req);
+      const canManageCoordinators = (await canManageCoordinatorAssignments(req));
       const memberIds = parseIdArray(req.body.members);
       const requestedCoordinatorIds = parseIdArray(req.body.coordinators);
       const coordinatorIds = canManageCoordinators ? requestedCoordinatorIds : [];
@@ -141,7 +142,7 @@ app.get("/projects", requireAuth, (req, res) => {
       }
 
       const validMemberIds = new Set(
-        database.listActiveMembers().map((member) => member.id),
+        (await database.listActiveMembers()).map((member) => member.id),
       );
       const invalidMemberIds = memberIds.filter(
         (memberId) => !validMemberIds.has(memberId),
@@ -167,26 +168,26 @@ app.get("/projects", requireAuth, (req, res) => {
         if (req.file) {
           safeUnlink(req.file.path);
         }
-        return renderProjectForm(res, {
+        return (await renderProjectForm(res, {
           title: "Adicionar Projeto",
           actionLabel: "Adicionar",
           formData,
           errors,
           canManageProject: true,
           canManageCoordinators,
-        });
+        }));
       }
 
       let storedLogo = null;
       try {
         storedLogo = await persistUploadedImage(req, { folder: "pet-c3/projects" });
-        const project = database.createProject({
+        const project = (await database.createProject({
           name: formData.name,
           logo: storedLogo || null,
           primaryColor: formData.primaryColor,
           memberIds,
           coordinatorIds,
-        });
+        }));
         req.flash("success", `Projeto "${project.name}" adicionado com sucesso!`);
         return res.redirect(urlFor("list_projects"));
       } catch (error) {
@@ -203,30 +204,30 @@ app.get("/projects", requireAuth, (req, res) => {
           req.flash("danger", `Erro ao adicionar projeto: ${error.message}`);
         }
 
-        return renderProjectForm(res, {
+        return (await renderProjectForm(res, {
           title: "Adicionar Projeto",
           actionLabel: "Adicionar",
           formData,
           errors,
           canManageProject: true,
           canManageCoordinators,
-        });
+        }));
       }
     },
   );
 
   // DETALHE: Rota GET /projects/edit/:id: consulta dados necessarios e monta resposta (HTML/JSON) para a tela solicitada.
 
-  app.get("/projects/edit/:id", requireAuth, (req, res) => {
-    const project = getRequestProjectById(req, parseId(req.params.id));
+  app.get("/projects/edit/:id", requireAuth, async (req, res) => {
+    const project = (await getRequestProjectById(req, parseId(req.params.id)));
     if (!project) {
       return notFound(res);
     }
 
     const canManageMetadata = true;
-    const canManageCoordinators = canManageCoordinatorAssignments(req, project);
+    const canManageCoordinators = (await canManageCoordinatorAssignments(req, project));
 
-    return renderProjectForm(res, {
+    return (await renderProjectForm(res, {
       title: "Editar Projeto",
       actionLabel: "Salvar Alterações",
       formData: {
@@ -240,7 +241,7 @@ app.get("/projects", requireAuth, (req, res) => {
       project,
       canManageProject: canManageMetadata,
       canManageCoordinators,
-    });
+    }));
   });
 
   // DETALHE: Inicio de bloco de rota declarada em multiplas linhas; revisar path e middlewares logo abaixo.
@@ -260,7 +261,7 @@ app.get("/projects", requireAuth, (req, res) => {
       }
 
       const projectId = parseId(req.params.id);
-      const project = getRequestProjectById(req, projectId);
+      const project = (await getRequestProjectById(req, projectId));
       if (!project) {
         if (req.file) {
           safeUnlink(req.file.path);
@@ -269,7 +270,7 @@ app.get("/projects", requireAuth, (req, res) => {
       }
 
       const canManageMetadata = true;
-      const canManageCoordinators = canManageCoordinatorAssignments(req, project);
+      const canManageCoordinators = (await canManageCoordinatorAssignments(req, project));
 
       const memberIds = parseIdArray(req.body.members);
       const requestedCoordinatorIds = parseIdArray(req.body.coordinators);
@@ -298,7 +299,7 @@ app.get("/projects", requireAuth, (req, res) => {
       }
 
       const validMemberIds = new Set(
-        database.listActiveMembers().map((member) => member.id),
+        (await database.listActiveMembers()).map((member) => member.id),
       );
       const invalidMemberIds = memberIds.filter(
         (memberId) => !validMemberIds.has(memberId),
@@ -324,7 +325,7 @@ app.get("/projects", requireAuth, (req, res) => {
         if (req.file) {
           safeUnlink(req.file.path);
         }
-        return renderProjectForm(res, {
+        return (await renderProjectForm(res, {
           title: "Editar Projeto",
           actionLabel: "Salvar Alterações",
           formData,
@@ -332,7 +333,7 @@ app.get("/projects", requireAuth, (req, res) => {
           project,
           canManageProject: canManageMetadata,
           canManageCoordinators,
-        });
+        }));
       }
 
       let logo = project.logo;
@@ -348,13 +349,13 @@ app.get("/projects", requireAuth, (req, res) => {
           logo = null;
         }
 
-        const updated = database.updateProject(projectId, {
+        const updated = (await database.updateProject(projectId, {
           name: formData.name,
           logo,
           primaryColor: formData.primaryColor,
           memberIds,
           coordinatorIds,
-        });
+        }));
         if (project.logo && logo !== project.logo) {
           await deleteStoredImage(project.logo);
         }
@@ -374,7 +375,7 @@ app.get("/projects", requireAuth, (req, res) => {
           req.flash("danger", `Erro ao editar projeto: ${error.message}`);
         }
 
-        return renderProjectForm(res, {
+        return (await renderProjectForm(res, {
           title: "Editar Projeto",
           actionLabel: "Salvar Alterações",
           formData,
@@ -386,7 +387,7 @@ app.get("/projects", requireAuth, (req, res) => {
           },
           canManageProject: canManageMetadata,
           canManageCoordinators,
-        });
+        }));
       }
     },
   );
@@ -401,7 +402,7 @@ app.get("/projects", requireAuth, (req, res) => {
     }
 
     const projectId = parseId(req.params.id);
-    const project = getRequestProjectById(req, projectId);
+    const project = (await getRequestProjectById(req, projectId));
     if (!project) {
       return notFound(res);
     }
@@ -415,7 +416,7 @@ app.get("/projects", requireAuth, (req, res) => {
     }
 
     try {
-      database.deleteProject(projectId);
+      (await database.deleteProject(projectId));
       if (project.logo) {
         await deleteStoredImage(project.logo);
       }

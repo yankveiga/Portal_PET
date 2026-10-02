@@ -5,6 +5,7 @@
  * - Alterar validacoes afeta qualidade dos dados e integracao com usuarios/projetos.
  * - Alterar fluxo de foto pode impactar armazenamento local/remoto das imagens.
  */
+const databaseAsync = require("../databaseAsync");
 function registerMemberRoutes(ctx) {
   const {
     app,
@@ -27,12 +28,16 @@ function registerMemberRoutes(ctx) {
     logError,
   } = ctx;
 
-app.get("/members", requireAuth, (req, res) => {
-    return render(res, "members/list.html", {
+app.get("/members", requireAuth, async (req, res, next) => {
+    try {
+      return render(res, "members/list.html", {
       title: "Membros Ativos",
       activeSection: "members",
-      members: database.listActiveMembers(),
-    });
+      members: await databaseAsync.listActiveMembers(),
+      });
+    } catch (error) {
+      return next(error);
+    }
   });
 
   // DETALHE: Rota GET /members/add: consulta dados necessarios e monta resposta (HTML/JSON) para a tela solicitada.
@@ -92,7 +97,7 @@ app.get("/members", requireAuth, (req, res) => {
     let storedPhoto = null;
     try {
       storedPhoto = await persistUploadedImage(req, { folder: "pet-c3/members" });
-      const member = database.createMember(formData.name, storedPhoto || null);
+      const member = (await database.createMember(formData.name, storedPhoto || null));
       req.flash("success", `Membro "${member.name}" adicionado com sucesso!`);
       return res.redirect(urlFor("list_members"));
     } catch (error) {
@@ -124,8 +129,8 @@ app.get("/members", requireAuth, (req, res) => {
 
   // DETALHE: Rota GET /members/edit/:id: consulta dados necessarios e monta resposta (HTML/JSON) para a tela solicitada.
 
-  app.get("/members/edit/:id", requireAuth, requireAdminPage, (req, res) => {
-    const member = database.getMemberById(parseId(req.params.id));
+  app.get("/members/edit/:id", requireAuth, requireAdminPage, async (req, res) => {
+    const member = (await database.getMemberById(parseId(req.params.id)));
     if (!member) {
       return notFound(res);
     }
@@ -152,7 +157,7 @@ app.get("/members", requireAuth, (req, res) => {
     }
 
     const memberId = parseId(req.params.id);
-    const member = database.getMemberById(memberId);
+    const member = (await database.getMemberById(memberId));
     if (!member) {
       return notFound(res);
     }
@@ -202,10 +207,10 @@ app.get("/members", requireAuth, (req, res) => {
           ? member.photo
           : null;
 
-      database.updateMember(memberId, {
+      (await database.updateMember(memberId, {
         name: formData.name,
         photo: nextPhoto,
-      });
+      }));
       if (previousPhotoToDelete) {
         await deleteStoredImage(previousPhotoToDelete);
       }
@@ -236,7 +241,7 @@ app.get("/members", requireAuth, (req, res) => {
 
   // DETALHE: Rota POST /members/delete/:id: processa envio de formulario/acao, valida entrada, persiste dados e redireciona.
 
-  app.post("/members/delete/:id", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/members/delete/:id", requireAuth, requireAdminPage, async (req, res) => {
     // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
     if (!ensureValidCsrf(req, res)) {
@@ -244,7 +249,7 @@ app.get("/members", requireAuth, (req, res) => {
     }
 
     const memberId = parseId(req.params.id);
-    const member = database.getMemberById(memberId);
+    const member = (await database.getMemberById(memberId));
     if (!member) {
       return notFound(res);
     }
@@ -255,7 +260,7 @@ app.get("/members", requireAuth, (req, res) => {
     }
 
     try {
-      database.deactivateMember(memberId);
+      (await database.deactivateMember(memberId));
       req.flash(
         "success",
         `Membro "${member.name}" desativado com sucesso e removido dos projetos!`,

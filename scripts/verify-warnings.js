@@ -6,6 +6,7 @@ const path = require('node:path');
 const nunjucks = require('nunjucks');
 const { registerReportRoutes } = require('../src/routes/reports');
 const source = fs.readFileSync(path.join(__dirname, '../src/database.js'), 'utf8');
+async function main() {
 const events = [];
 const context = vm.createContext({
   isUserMemberOfProjectName: (id) => id === 10 || id === 11,
@@ -19,28 +20,28 @@ const context = vm.createContext({
     },
   }) }),
 });
-vm.runInContext(source.slice(source.indexOf('function listMemberWarningEvents('), source.indexOf('function setMemberWarningCount(')), context);
+vm.runInContext(source.slice(source.indexOf('async function listMemberWarningEvents('), source.indexOf('async function setMemberWarningCount(')), context);
 const mutate = (action, extra = {}) => context.mutateMemberWarning({ memberId: 6, actorUserId: 10, action, ...extra });
-assert.throws(() => mutate('add', { actorUserId: 1 }), /Administrativo/);
-mutate('add', { note: 'Original' });
+await assert.rejects(() => mutate('add', { actorUserId: 1 }), /Administrativo/);
+await mutate('add', { note: 'Original' });
 const original = { ...events[0] };
-mutate('edit', { warningId: 1, actorUserId: 11, note: 'Revised' });
+await mutate('edit', { warningId: 1, actorUserId: 11, note: 'Revised' });
 assert.equal(events[1].previous_note, 'Original');
 assert.equal(events[1].actor_user_id, 11);
-assert.equal(context.listMemberWarningEvents(6).find(e => e.id === 1).current_note, 'Revised');
+assert.equal((await context.listMemberWarningEvents(6)).find(e => e.id === 1).current_note, 'Revised');
 assert.equal(context.getMemberWarningState(6).warning_count, 1);
-assert.throws(() => mutate('edit', { memberId: 7, warningId: 1 }), /encontrada/);
-mutate('delete', { warningId: 1 });
+await assert.rejects(() => mutate('edit', { memberId: 7, warningId: 1 }), /encontrada/);
+await mutate('delete', { warningId: 1 });
 assert.equal(events[2].note, 'Revised');
 assert.equal(events[2].event_type, 'deleted');
 assert.equal(context.getMemberWarningState(6).warning_count, 0);
-assert(context.listMemberWarningEvents(6).find(e => e.id === 1).is_deleted);
+assert((await context.listMemberWarningEvents(6)).find(e => e.id === 1).is_deleted);
 assert.deepEqual(events[0], original);
-assert.throws(() => mutate('delete', { warningId: 1 }), /excluída/);
-assert.throws(() => mutate('edit', { warningId: 1 }), /excluída/);
-for (let i = 0; i < 3; i++) mutate('add');
-assert.throws(() => mutate('add'), /3 advertências/);
-assert.throws(() => mutate('add', { note: 'x'.repeat(301) }), /300/);
+await assert.rejects(() => mutate('delete', { warningId: 1 }), /excluída/);
+await assert.rejects(() => mutate('edit', { warningId: 1 }), /excluída/);
+for (let i = 0; i < 3; i++) await mutate('add');
+await assert.rejects(() => mutate('add'), /3 advertências/);
+await assert.rejects(() => mutate('add', { note: 'x'.repeat(301) }), /300/);
 
 // Direct POSTs cannot bypass membership or CSRF, including users flagged as admins.
 let writes = 0;
@@ -61,15 +62,15 @@ const response = { redirect() {} };
 const handler = routes['/relatorios/warnings/:memberId/update'];
 for (const action of ['add', 'edit', 'delete']) {
   request.body.warning_action = action;
-  handler(request, response);
+  await handler(request, response);
 }
 assert.equal(writes, 0);
 membership = true;
 csrf = false;
-handler(request, response);
+await handler(request, response);
 assert.equal(writes, 0);
 csrf = true;
-handler(request, response);
+await handler(request, response);
 assert.equal(writes, 1);
 
 const env = new nunjucks.Environment(null, { autoescape: true });
@@ -88,3 +89,6 @@ for (const canManageWarnings of [true, false]) {
   for (const script of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) new vm.Script(script[1]);
 }
 console.log('OK: warning lifecycle, immutable history, membership, CSRF, rendering and scripts.');
+
+}
+main().catch(error => { console.error(error); process.exitCode = 1; });

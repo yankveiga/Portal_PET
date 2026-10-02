@@ -30,6 +30,7 @@ function registerAlmoxRoutes(ctx) {
     sendApiError,
     mapInventoryApiItem,
   } = ctx;
+  const databaseAsync = require("../databaseAsync");
 
   function userMaintenancePath(anchor = "user-access-list") {
     const suffix = anchor ? `#${anchor}` : "";
@@ -44,10 +45,10 @@ function registerAlmoxRoutes(ctx) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text);
   }
 
-app.get("/almoxarifado", requireAuth, (req, res) => {
-    return renderAlmox(res, {
+app.get("/almoxarifado", requireAuth, async (req, res) => {
+    return (await renderAlmox(res, {
       activeTab: req.query.tab,
-    });
+    }));
   });
 
   // DETALHE: Inicio de bloco de rota declarada em multiplas linhas; revisar path e middlewares logo abaixo.
@@ -56,7 +57,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/manutencao-usuarios/users/create",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
       if (!ensureValidCsrf(req, res)) {
@@ -108,7 +109,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       if (userFormData.memberId && !memberId) {
         userErrors.memberId = ["Selecione um membro válido."];
       } else if (memberId) {
-        const member = database.getMemberById(memberId);
+        const member = (await database.getMemberById(memberId));
         if (!member || !member.is_active) {
           userErrors.memberId = ["Selecione um membro ativo válido."];
         }
@@ -117,20 +118,20 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       // DETALHE: Se houver erro de validacao, encerra cedo para evitar persistencia inconsistente.
 
       if (Object.keys(userErrors).length > 0) {
-        return renderUserMaintenance(res, {
+        return (await renderUserMaintenance(res, {
           userFormData,
           userErrors,
-        });
+        }));
       }
 
       try {
-        const passwordHash = bcrypt.hashSync(rawPassword, 12);
-        const createdUser = database.createUser(userFormData.username, passwordHash, {
+        const passwordHash = await bcrypt.hash(rawPassword, 12);
+        const createdUser = (await database.createUser(userFormData.username, passwordHash, {
           name: userFormData.name,
           email: userFormData.email || null,
           role: userFormData.role,
           memberId: memberId || null,
-        });
+        }));
 
         req.flash(
           "success",
@@ -155,10 +156,10 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
           req.flash("danger", `Erro ao criar usuário: ${error.message}`);
         }
 
-        return renderUserMaintenance(res, {
+        return (await renderUserMaintenance(res, {
           userFormData,
           userErrors,
-        });
+        }));
       }
     },
   );
@@ -169,7 +170,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/manutencao-usuarios/users/link/:id",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
       if (!ensureValidCsrf(req, res)) {
@@ -182,7 +183,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
         return res.redirect(userMaintenancePath());
       }
 
-      const user = database.getUserById(userId);
+      const user = (await database.getUserById(userId));
       if (!user) {
         req.flash("warning", "Usuário não encontrado.");
         return res.redirect(userMaintenancePath());
@@ -196,7 +197,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       if (memberId) {
-        const member = database.getMemberById(memberId);
+        const member = (await database.getMemberById(memberId));
         if (!member || !member.is_active) {
           req.flash("warning", "Selecione um membro ativo válido.");
           return res.redirect(userMaintenancePath());
@@ -204,7 +205,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const updatedUser = database.setUserMemberLink(userId, memberId || null);
+        const updatedUser = (await database.setUserMemberLink(userId, memberId || null));
         if (updatedUser?.member_name) {
           req.flash(
             "success",
@@ -229,7 +230,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/manutencao-usuarios/users/reset-password/:id",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       if (!ensureValidCsrf(req, res)) {
         return;
       }
@@ -240,7 +241,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
         return res.redirect(userMaintenancePath());
       }
 
-      const user = database.getUserById(userId);
+      const user = (await database.getUserById(userId));
       if (!user) {
         req.flash("warning", "Usuário não encontrado.");
         return res.redirect(userMaintenancePath());
@@ -253,8 +254,8 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const passwordHash = bcrypt.hashSync(rawPassword, 12);
-        database.updateUserPassword(userId, passwordHash);
+        const passwordHash = await bcrypt.hash(rawPassword, 12);
+        (await database.updateUserPassword(userId, passwordHash));
         req.flash("success", `Senha de @${user.username} redefinida com sucesso.`);
       } catch (error) {
         logError(req, "Erro ao redefinir senha de usuário:", error);
@@ -269,7 +270,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/manutencao-usuarios/users/email/:id",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       if (!ensureValidCsrf(req, res)) {
         return;
       }
@@ -280,7 +281,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
         return res.redirect(userMaintenancePath());
       }
 
-      const user = database.getUserById(userId);
+      const user = (await database.getUserById(userId));
       if (!user) {
         req.flash("warning", "Usuário não encontrado.");
         return res.redirect(userMaintenancePath());
@@ -293,7 +294,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const updated = database.updateUserEmail(userId, email || null);
+        const updated = (await database.updateUserEmail(userId, email || null));
         if (!updated) {
           req.flash("warning", "Usuário não encontrado.");
           return res.redirect(userMaintenancePath());
@@ -320,7 +321,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/manutencao-usuarios/users/delete/:id",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       if (!ensureValidCsrf(req, res)) {
         return;
       }
@@ -337,7 +338,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const result = database.deleteUser(userId);
+        const result = (await database.deleteUser(userId));
         if (!result?.deleted) {
           if (result?.reason === "not_found") {
             req.flash("warning", "Usuário não encontrado.");
@@ -368,7 +369,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/inventory/create",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
       if (!ensureValidCsrf(req, res)) {
@@ -392,15 +393,15 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       // DETALHE: Se houver erro de validacao, encerra cedo para evitar persistencia inconsistente.
 
       if (Object.keys(itemErrors).length > 0) {
-        return renderAlmox(res, {
+        return (await renderAlmox(res, {
           activeTab,
           itemFormData,
           itemErrors,
-        });
+        }));
       }
 
       try {
-        const createdItem = database.createInventoryItem({
+        const createdItem = (await database.createInventoryItem({
           name: normalized.name,
           itemType: normalized.itemType,
           category: normalized.category,
@@ -409,7 +410,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
           locationId: normalized.locationId,
           quantity: normalized.quantity,
           description: normalized.description,
-        });
+        }));
 
         req.flash(
           "success",
@@ -419,11 +420,11 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       } catch (error) {
         logError(req, "Erro ao adicionar item ao estoque:", error);
         req.flash("danger", `Erro ao adicionar item: ${error.message}`);
-        return renderAlmox(res, {
+        return (await renderAlmox(res, {
           activeTab,
           itemFormData,
           itemErrors,
-        });
+        }));
       }
     },
   );
@@ -434,7 +435,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/categories/create",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
       if (!ensureValidCsrf(req, res)) {
@@ -450,15 +451,15 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       // DETALHE: Se houver erro de validacao, encerra cedo para evitar persistencia inconsistente.
 
       if (Object.keys(errors).length > 0) {
-        return renderAlmox(res, {
+        return (await renderAlmox(res, {
           activeTab,
           categoryFormData: { name: normalized },
           categoryErrors: errors,
-        });
+        }));
       }
 
       try {
-        const category = database.createInventoryCategory(normalized);
+        const category = (await database.createInventoryCategory(normalized));
         req.flash("success", `Categoria "${category.name}" criada com sucesso.`);
         return res.redirect(almoxPath(activeTab));
       } catch (error) {
@@ -469,11 +470,11 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
           req.flash("danger", `Erro ao criar categoria: ${error.message}`);
         }
 
-        return renderAlmox(res, {
+        return (await renderAlmox(res, {
           activeTab,
           categoryFormData: { name: normalized },
           categoryErrors: errors,
-        });
+        }));
       }
     },
   );
@@ -482,7 +483,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/inventory/edit/:id",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       if (!ensureValidCsrf(req, res)) {
         return;
       }
@@ -494,7 +495,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
         return res.redirect(almoxPath(activeTab));
       }
 
-      const existingItem = database.getInventoryItemById(itemId);
+      const existingItem = (await database.getInventoryItemById(itemId));
       if (!existingItem) {
         req.flash("warning", "Material não encontrado.");
         return res.redirect(almoxPath(activeTab));
@@ -514,16 +515,16 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       const { errors: inventoryEditErrors, normalized } = validateInventoryPayload(parsed);
 
       if (Object.keys(inventoryEditErrors).length > 0) {
-        return renderAlmox(res, {
+        return (await renderAlmox(res, {
           activeTab,
           inventoryEditOpenId: itemId,
           inventoryEditFormData,
           inventoryEditErrors,
-        });
+        }));
       }
 
       try {
-        const updatedItem = database.updateInventoryItem(itemId, {
+        const updatedItem = (await database.updateInventoryItem(itemId, {
           name: normalized.name,
           itemType: normalized.itemType,
           category: normalized.category,
@@ -532,7 +533,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
           locationId: normalized.locationId,
           quantity: normalized.quantity,
           description: normalized.description,
-        });
+        }));
 
         if (!updatedItem) {
           req.flash("warning", "Material não encontrado.");
@@ -549,12 +550,12 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       } catch (error) {
         logError(req, "Erro ao editar item do almoxarifado:", error);
         req.flash("danger", `Erro ao editar material: ${error.message}`);
-        return renderAlmox(res, {
+        return (await renderAlmox(res, {
           activeTab,
           inventoryEditOpenId: itemId,
           inventoryEditFormData,
           inventoryEditErrors,
-        });
+        }));
       }
     },
   );
@@ -565,7 +566,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/categories/delete/:id",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
       if (!ensureValidCsrf(req, res)) {
@@ -579,7 +580,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const deleted = database.deleteInventoryCategory(categoryId);
+        const deleted = (await database.deleteInventoryCategory(categoryId));
         if (!deleted) {
           req.flash("warning", "Categoria não encontrada.");
         } else {
@@ -600,7 +601,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/locations/create",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
       if (!ensureValidCsrf(req, res)) {
@@ -616,15 +617,15 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       // DETALHE: Se houver erro de validacao, encerra cedo para evitar persistencia inconsistente.
 
       if (Object.keys(errors).length > 0) {
-        return renderAlmox(res, {
+        return (await renderAlmox(res, {
           activeTab,
           locationFormData: { name: normalized },
           locationErrors: errors,
-        });
+        }));
       }
 
       try {
-        const location = database.createInventoryLocation(normalized);
+        const location = (await database.createInventoryLocation(normalized));
         req.flash("success", `Local "${location.name}" criado com sucesso.`);
         return res.redirect(almoxPath(activeTab));
       } catch (error) {
@@ -635,11 +636,11 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
           req.flash("danger", `Erro ao criar local: ${error.message}`);
         }
 
-        return renderAlmox(res, {
+        return (await renderAlmox(res, {
           activeTab,
           locationFormData: { name: normalized },
           locationErrors: errors,
-        });
+        }));
       }
     },
   );
@@ -650,7 +651,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/locations/delete/:id",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
       if (!ensureValidCsrf(req, res)) {
@@ -664,7 +665,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const deleted = database.deleteInventoryLocation(locationId);
+        const deleted = (await database.deleteInventoryLocation(locationId));
         if (!deleted) {
           req.flash("warning", "Local não encontrado.");
         } else {
@@ -685,7 +686,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/inventory/delete/:id",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
       if (!ensureValidCsrf(req, res)) {
@@ -699,7 +700,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const deletedItem = database.deleteInventoryItem(itemId);
+        const deletedItem = (await database.deleteInventoryItem(itemId));
 
         if (!deletedItem) {
           req.flash("warning", "Produto não encontrado.");
@@ -720,7 +721,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
 
   // DETALHE: Rota POST /almoxarifado/inventory/withdraw: processa envio de formulario/acao, valida entrada, persiste dados e redireciona.
 
-  app.post("/almoxarifado/inventory/withdraw", requireAuth, (req, res) => {
+  app.post("/almoxarifado/inventory/withdraw", requireAuth, async (req, res) => {
     // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
     if (!ensureValidCsrf(req, res)) {
@@ -748,27 +749,27 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     // DETALHE: Se houver erro de validacao, encerra cedo para evitar persistencia inconsistente.
 
     if (Object.keys(withdrawErrors).length > 0) {
-      return renderAlmox(res, {
+      return (await renderAlmox(res, {
         activeTab,
         withdrawFormData,
         withdrawErrors,
-      });
+      }));
     }
 
-    const result = database.withdrawInventoryItem({
+    const result = (await database.withdrawInventoryItem({
       nameOrCode: withdrawFormData.nameOrCode,
       quantity,
       userId: req.currentUser.id,
-    });
+    }));
 
     if (!result.success) {
-      return renderAlmox(res, {
+      return (await renderAlmox(res, {
         activeTab,
         withdrawFormData,
         withdrawErrors: {
           form: [result.message],
         },
-      });
+      }));
     }
 
     req.flash("success", result.message);
@@ -777,7 +778,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
 
   // DETALHE: Rota POST /almoxarifado/inventory/borrow: processa envio de formulario/acao, valida entrada, persiste dados e redireciona.
 
-  app.post("/almoxarifado/inventory/borrow", requireAuth, (req, res) => {
+  app.post("/almoxarifado/inventory/borrow", requireAuth, async (req, res) => {
     // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
     if (!ensureValidCsrf(req, res)) {
@@ -805,27 +806,27 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     // DETALHE: Se houver erro de validacao, encerra cedo para evitar persistencia inconsistente.
 
     if (Object.keys(loanErrors).length > 0) {
-      return renderAlmox(res, {
+      return (await renderAlmox(res, {
         activeTab,
         loanFormData,
         loanErrors,
-      });
+      }));
     }
 
-    const result = database.borrowInventoryItem({
+    const result = (await database.borrowInventoryItem({
       nameOrCode: loanFormData.nameOrCode,
       quantity,
       userId: req.currentUser.id,
-    });
+    }));
 
     if (!result.success) {
-      return renderAlmox(res, {
+      return (await renderAlmox(res, {
         activeTab,
         loanFormData,
         loanErrors: {
           form: [result.message],
         },
-      });
+      }));
     }
 
     req.flash("success", result.message);
@@ -834,7 +835,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
 
   // DETALHE: Rota POST /almoxarifado/loans/return/:id: processa envio de formulario/acao, valida entrada, persiste dados e redireciona.
 
-  app.post("/almoxarifado/loans/return/:id", requireAuth, (req, res) => {
+  app.post("/almoxarifado/loans/return/:id", requireAuth, async (req, res) => {
     // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
     if (!ensureValidCsrf(req, res)) {
@@ -847,7 +848,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       return res.redirect(almoxPath("borrowed"));
     }
 
-    const loan = database.getInventoryLoanById(loanId);
+    const loan = (await database.getInventoryLoanById(loanId));
     if (!loan) {
       req.flash("warning", "Empréstimo não encontrado.");
       return res.redirect(almoxPath("borrowed"));
@@ -861,10 +862,10 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       return res.redirect(almoxPath("borrowed"));
     }
 
-    const result = database.returnInventoryLoan({
+    const result = (await database.returnInventoryLoan({
       loanId,
       actorUserId: req.currentUser.id,
-    });
+    }));
 
     if (!result.success) {
       req.flash("warning", result.message);
@@ -881,7 +882,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/loans/extend/:id",
     requireAuth,
     requireAdminPage,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Interrompe o fluxo quando token CSRF esta invalido ou expirado.
 
       if (!ensureValidCsrf(req, res)) {
@@ -904,11 +905,11 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
         return res.redirect(almoxPath("borrowed"));
       }
 
-      const result = database.extendInventoryLoan({
+      const result = (await database.extendInventoryLoan({
         loanId,
         extraDays,
         actorUserId: req.currentUser.id,
-      });
+      }));
 
       if (!result.success) {
         req.flash("warning", result.message);
@@ -922,8 +923,22 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
 
   // DETALHE: Rota GET /almoxarifado/api/itens: consulta dados necessarios e monta resposta (HTML/JSON) para a tela solicitada.
 
-  app.get("/almoxarifado/api/itens", requireAuth, (req, res) => {
-    return res.json(database.listInventoryItems().map(mapInventoryApiItem));
+  app.get("/almoxarifado/api/itens", requireAuth, async (req, res, next) => {
+    try {
+      const itemType = String(req.query.type || "").trim().toLowerCase();
+      const items = await databaseAsync.listInventoryItems({ type: itemType || null });
+      return res.json(items.map(mapInventoryApiItem));
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  app.get("/almoxarifado/api/dashboard", requireAuth, async (req, res, next) => {
+    try {
+      return res.json(await databaseAsync.getInventoryDashboardData());
+    } catch (error) {
+      return next(error);
+    }
   });
 
   // DETALHE: Inicio de bloco de rota declarada em multiplas linhas; revisar path e middlewares logo abaixo.
@@ -932,7 +947,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/api/itens",
     requireAuth,
     requireAdminApi,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Garante integridade de chamadas API protegidas por CSRF.
 
       if (!ensureValidApiCsrf(req, res)) {
@@ -948,7 +963,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const item = database.createInventoryItem({
+        const item = (await database.createInventoryItem({
           name: normalized.name,
           itemType: normalized.itemType,
           category: normalized.category,
@@ -957,7 +972,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
           locationId: normalized.locationId,
           quantity: normalized.quantity,
           description: normalized.description,
-        });
+        }));
         return res.status(201).json(item);
       } catch (error) {
         logError(req, "Erro ao criar item via API:", error);
@@ -972,7 +987,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/api/itens/:id",
     requireAuth,
     requireAdminApi,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Garante integridade de chamadas API protegidas por CSRF.
 
       if (!ensureValidApiCsrf(req, res)) {
@@ -993,7 +1008,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const updated = database.updateInventoryItem(itemId, {
+        const updated = (await database.updateInventoryItem(itemId, {
           name: normalized.name,
           itemType: normalized.itemType,
           category: normalized.category,
@@ -1002,7 +1017,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
           locationId: normalized.locationId,
           quantity: normalized.quantity,
           description: normalized.description,
-        });
+        }));
 
         if (!updated) {
           return sendApiError(req, res, 404, "Item não encontrado.");
@@ -1022,7 +1037,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/api/itens/:id",
     requireAuth,
     requireAdminApi,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Garante integridade de chamadas API protegidas por CSRF.
 
       if (!ensureValidApiCsrf(req, res)) {
@@ -1035,7 +1050,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const deleted = database.deleteInventoryItem(itemId);
+        const deleted = (await database.deleteInventoryItem(itemId));
         if (!deleted) {
           return sendApiError(req, res, 404, "Item não encontrado.");
         }
@@ -1053,9 +1068,9 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
 
   // DETALHE: Rota GET /almoxarifado/api/categorias: consulta dados necessarios e monta resposta (HTML/JSON) para a tela solicitada.
 
-  app.get("/almoxarifado/api/categorias", requireAuth, (req, res) => {
+  app.get("/almoxarifado/api/categorias", requireAuth, async (req, res) => {
     return res.json(
-      database.listInventoryCategories().map((category) => ({
+      (await database.listInventoryCategories()).map((category) => ({
         id: category.id,
         nome: category.name,
       })),
@@ -1068,7 +1083,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/api/categorias",
     requireAuth,
     requireAdminApi,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Garante integridade de chamadas API protegidas por CSRF.
 
       if (!ensureValidApiCsrf(req, res)) {
@@ -1086,7 +1101,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const category = database.createInventoryCategory(normalized);
+        const category = (await database.createInventoryCategory(normalized));
         return res.status(201).json({ id: category.id, nome: category.name });
       } catch (error) {
         if (isUniqueConstraintError(error)) {
@@ -1104,7 +1119,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/api/categorias/:id",
     requireAuth,
     requireAdminApi,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Garante integridade de chamadas API protegidas por CSRF.
 
       if (!ensureValidApiCsrf(req, res)) {
@@ -1127,7 +1142,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const category = database.updateInventoryCategory(categoryId, normalized);
+        const category = (await database.updateInventoryCategory(categoryId, normalized));
         if (!category) {
           return sendApiError(req, res, 404, "Categoria não encontrada.");
         }
@@ -1149,7 +1164,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/api/categorias/:id",
     requireAuth,
     requireAdminApi,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Garante integridade de chamadas API protegidas por CSRF.
 
       if (!ensureValidApiCsrf(req, res)) {
@@ -1162,7 +1177,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const deleted = database.deleteInventoryCategory(categoryId);
+        const deleted = (await database.deleteInventoryCategory(categoryId));
         if (!deleted) {
           return sendApiError(req, res, 404, "Categoria não encontrada.");
         }
@@ -1180,9 +1195,9 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
 
   // DETALHE: Rota GET /almoxarifado/api/locais: consulta dados necessarios e monta resposta (HTML/JSON) para a tela solicitada.
 
-  app.get("/almoxarifado/api/locais", requireAuth, (req, res) => {
+  app.get("/almoxarifado/api/locais", requireAuth, async (req, res) => {
     return res.json(
-      database.listInventoryLocations().map((location) => ({
+      (await database.listInventoryLocations()).map((location) => ({
         id: location.id,
         nome: location.name,
       })),
@@ -1195,7 +1210,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/api/locais",
     requireAuth,
     requireAdminApi,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Garante integridade de chamadas API protegidas por CSRF.
 
       if (!ensureValidApiCsrf(req, res)) {
@@ -1213,7 +1228,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const location = database.createInventoryLocation(normalized);
+        const location = (await database.createInventoryLocation(normalized));
         return res.status(201).json({ id: location.id, nome: location.name });
       } catch (error) {
         if (isUniqueConstraintError(error)) {
@@ -1231,7 +1246,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/api/locais/:id",
     requireAuth,
     requireAdminApi,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Garante integridade de chamadas API protegidas por CSRF.
 
       if (!ensureValidApiCsrf(req, res)) {
@@ -1254,7 +1269,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const location = database.updateInventoryLocation(locationId, normalized);
+        const location = (await database.updateInventoryLocation(locationId, normalized));
         if (!location) {
           return sendApiError(req, res, 404, "Local não encontrado.");
         }
@@ -1276,7 +1291,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
     "/almoxarifado/api/locais/:id",
     requireAuth,
     requireAdminApi,
-    (req, res) => {
+    async (req, res) => {
       // DETALHE: Garante integridade de chamadas API protegidas por CSRF.
 
       if (!ensureValidApiCsrf(req, res)) {
@@ -1289,7 +1304,7 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
       }
 
       try {
-        const deleted = database.deleteInventoryLocation(locationId);
+        const deleted = (await database.deleteInventoryLocation(locationId));
         if (!deleted) {
           return sendApiError(req, res, 404, "Local não encontrado.");
         }
@@ -1309,15 +1324,15 @@ app.get("/almoxarifado", requireAuth, (req, res) => {
 
 // DETALHE: Rota GET /api/project/:project_id/members: consulta dados necessarios e monta resposta (HTML/JSON) para a tela solicitada.
 
-app.get("/api/project/:project_id/members", requireAuth, (req, res) => {
+app.get("/api/project/:project_id/members", requireAuth, async (req, res) => {
     const projectId = parseId(req.params.project_id);
-    const project = projectId ? database.getProjectById(projectId) : null;
+    const project = projectId ? (await database.getProjectById(projectId)) : null;
 
     if (!project) {
       return sendApiError(req, res, 404, "Projeto não encontrado.");
     }
 
-    if (!canCreateAtaForProject(req, project) && !canManageProject(req, project)) {
+    if (!(await canCreateAtaForProject(req, project)) && !(await canManageProject(req, project))) {
       return sendApiError(req, res, 403, "Você não tem acesso aos membros deste projeto.");
     }
 

@@ -10,6 +10,7 @@ const bcrypt = require("bcryptjs");
 const database = require("./src/database");
 const { config } = require("./src/config");
 const { createNotificationService } = require("./src/services/notificationService");
+const databaseAsync = require("./src/databaseAsync");
 
 // SECAO: bootstrap do servidor HTTP com garantia de schema antes do listen.
 
@@ -42,7 +43,7 @@ function isRetryableDatabaseStartupError(error) {
 async function ensureSchemaWithRetry(maxAttempts = 5) {
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      database.ensureSchema();
+      (await database.ensureSchema());
       return;
     } catch (error) {
       const canRetry = isRetryableDatabaseStartupError(error) && attempt < maxAttempts;
@@ -63,25 +64,25 @@ async function startServer() {
 
   if (config.bootstrapAdmin.enabled) {
     const { username, password, name } = config.bootstrapAdmin;
-    if (username && password && !database.getUserByUsername(username)) {
+    if (username && password && !(await database.getUserByUsername(username))) {
       const passwordHash = bcrypt.hashSync(password, 12);
-      database.createUser(username, passwordHash, { name, role: "admin" });
+      (await database.createUser(username, passwordHash, { name, role: "admin" }));
       console.log(`Admin bootstrap criado: ${username}`);
     }
   }
 
   console.log("Banco: PostgreSQL/Neon");
 
-  const app = createApp();
+  const app = (await createApp());
   const notificationService = createNotificationService({ database, config });
   const notificationSweepIntervalMs = Math.max(
     30_000,
     Number(process.env.NOTIFICATION_SWEEP_INTERVAL_MS || 300000),
   );
-  notificationService.startDeadlineScheduler({
+  (await notificationService.startDeadlineScheduler({
     intervalMs: notificationSweepIntervalMs,
     runOnStart: true,
-  });
+  }));
 
   const server = app.listen(config.port, () => {
     console.log(`Gestor de Atas disponivel em http://0.0.0.0:${config.port}`);
@@ -94,7 +95,12 @@ async function startServer() {
     }
     shuttingDown = true;
     console.log(`Sinal ${signal} recebido. Encerrando servidor...`);
-    server.close(() => {
+    server.close(async () => {
+      try {
+        await databaseAsync.closePool();
+      } catch (error) {
+        console.error("Falha ao encerrar pool assíncrono:", error);
+      }
       console.log("Servidor HTTP encerrado.");
       process.exit(0);
     });

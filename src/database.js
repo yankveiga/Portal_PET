@@ -1,3 +1,4 @@
+const asyncArray = require("./asyncArray");
 /*
  * ARQUIVO: src/database.js
  * FUNCAO: camada de persistencia PostgreSQL/Neon (schema, consultas, insercoes e atualizacoes de dados de dominio).
@@ -6,7 +7,7 @@
  * - Mudancas em regras de normalizacao/validacao podem alterar dados gravados e relatorios gerados.
  * - Mudancas em nomes de colunas/joins afetam telas, filtros e exportacoes.
  */
-const { MessageChannel, Worker, receiveMessageOnPort } = require("node:worker_threads");
+const postgres = require("./postgres");
 
 const { config } = require("./config");
 const { firstNamesSummary } = require("./utils");
@@ -14,50 +15,12 @@ const { firstNamesSummary } = require("./utils");
 // ESTADO GLOBAL: instancia unica do adaptador de banco para a aplicacao.
 let database;
 let schemaEnsured = false;
-// ESTADO GLOBAL: ponte ativa entre thread principal e worker do Postgres.
-let bridgeState;
-// ESTADO GLOBAL: sequencia crescente para correlacao de mensagens SQL.
-let querySequence = 0;
-// ESTADO GLOBAL: buffer de espera usado no modo sincrono.
-const sleeper = new Int32Array(new SharedArrayBuffer(4));
-const DEFAULT_QUERY_TIMEOUT_MS = Math.max(
-  1000,
-  Number.parseInt(process.env.DB_SYNC_QUERY_TIMEOUT_MS || "15000", 10) || 15000,
-);
-// CONSTANTE DE DOMINIO: timezone oficial usada em datas/horarios do sistema.
+// Timezone compartilhada pelas regras de datas da aplicacao.
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Sao_Paulo";
 
-function disposeBridge() {
-  if (!bridgeState) {
-    return;
-  }
 
-  const current = bridgeState;
-  bridgeState = null;
 
-  try {
-    current.port?.close?.();
-  } catch (_error) {
-    // noop
-  }
 
-  try {
-    current.worker?.terminate?.();
-  } catch (_error) {
-    // noop
-  }
-}
-
-// FUNCAO: normalizeError.
-function normalizeError(payload) {
-  if (!payload) {
-    return null;
-  }
-
-  const error = new Error(payload.message || "Database query failed");
-  Object.assign(error, payload);
-  return error;
-}
 
 // FUNCAO: toPostgresSql.
 function toPostgresSql(sql) {
@@ -101,226 +64,13 @@ function toPostgresSql(sql) {
     .replace(/\bREFERENCES\s+user\b/gi, 'REFERENCES "user"');
 }
 
-// FUNCAO: createSyncBridge.
-function createSyncBridge() {
-  if (bridgeState) {
-    return bridgeState;
-  }
 
-  if (!process.env.DATABASE_URL) {
-    throw new Error(
-      "DATABASE_URL não configurada. Para Neon/Postgres, defina DATABASE_URL no ambiente.",
-    );
-  }
 
-  const workerCode = `
-    const { parentPort } = require("node:worker_threads");
-    const { Client } = require("pg");
 
-    const client = new Client({
-      connectionString: process.env.DATABASE_URL,
-      connectionTimeoutMillis: Math.max(
-        1000,
-        Number.parseInt(process.env.PG_CONNECTION_TIMEOUT_MS || "10000", 10) || 10000,
-      ),
-      ssl: process.env.DATABASE_URL.includes("sslmode=")
-        ? undefined
-        : { rejectUnauthorized: false },
-    });
 
-    let channel = null;
-    let connected = false;
 
-    // FUNCAO INTERNA DO WORKER: conecta no banco uma unica vez.
-    async function ensureConnected() {
-      if (!connected) {
-        await client.connect();
-        await client.query("SET TIME ZONE 'America/Sao_Paulo'");
-        connected = true;
-      }
-    }
 
-    // FUNCAO INTERNA DO WORKER: executa SQL recebido e responde no canal.
-    async function handle(message) {
-      const { id, sql, params } = message;
-      try {
-        await ensureConnected();
-        const result = await client.query(sql, params || []);
-        channel.postMessage({
-          id,
-          ok: true,
-          result: {
-            rows: result.rows || [],
-            rowCount: Number(result.rowCount || 0),
-            command: result.command || "",
-          },
-        });
-      } catch (error) {
-        channel.postMessage({
-          id,
-          ok: false,
-          error: {
-            message: error.message,
-            code: error.code,
-            detail: error.detail,
-            table: error.table,
-            constraint: error.constraint,
-          },
-        });
-      }
-    }
 
-    // EVENTO DO WORKER: recebe MessagePort inicial e habilita consumo de comandos.
-    parentPort.on("message", (message) => {
-      if (!message || !message.port) {
-        return;
-      }
-      channel = message.port;
-      channel.on("message", (payload) => {
-        handle(payload);
-      });
-    });
-  `;
-
-  const worker = new Worker(workerCode, { eval: true });
-  const { port1, port2 } = new MessageChannel();
-  worker.postMessage({ port: port2 }, [port2]);
-  if (typeof worker.unref === "function") {
-    worker.unref();
-  }
-  if (typeof port1.unref === "function") {
-    port1.unref();
-  }
-
-  bridgeState = {
-    worker,
-    port: port1,
-    pending: new Map(),
-    closed: false,
-    lastError: null,
-  };
-
-  worker.on("error", (error) => {
-    bridgeState = bridgeState && bridgeState.worker === worker
-      ? {
-          ...bridgeState,
-          closed: true,
-          lastError: error || new Error("Worker do banco encerrou com erro."),
-        }
-      : bridgeState;
-  });
-
-  worker.on("exit", (code) => {
-    if (code === 0) {
-      return;
-    }
-    const exitError = new Error(`Worker do banco finalizou com codigo ${code}.`);
-    bridgeState = bridgeState && bridgeState.worker === worker
-      ? {
-          ...bridgeState,
-          closed: true,
-          lastError: exitError,
-        }
-      : bridgeState;
-  });
-
-  return bridgeState;
-}
-
-// FUNCAO: querySync.
-function querySync(sql, params = []) {
-  const bridge = createSyncBridge();
-  const id = ++querySequence;
-  const startedAt = Date.now();
-  const timeoutMs = DEFAULT_QUERY_TIMEOUT_MS;
-
-  try {
-    bridge.port.postMessage({ id, sql, params });
-  } catch (error) {
-    disposeBridge();
-    throw error;
-  }
-
-  // LOOP SINCRONO: aguarda retorno do worker mantendo API simples para chamadas locais.
-  while (true) {
-    if (bridge.closed) {
-      const workerError = bridge.lastError || new Error("Worker de banco indisponivel.");
-      disposeBridge();
-      throw workerError;
-    }
-
-    if ((Date.now() - startedAt) > timeoutMs) {
-      const sqlPreview = String(sql || "").replace(/\s+/g, " ").trim().slice(0, 180);
-      disposeBridge();
-      throw new Error(
-        `Timeout na consulta ao banco apos ${timeoutMs}ms. SQL: ${sqlPreview || "[vazio]"}`,
-      );
-    }
-
-    const ready = bridge.pending.get(id);
-    if (ready) {
-      bridge.pending.delete(id);
-      if (!ready.ok) {
-        throw normalizeError(ready.error);
-      }
-      return ready.result;
-    }
-
-    const packet = receiveMessageOnPort(bridge.port);
-    if (packet && packet.message) {
-      const message = packet.message;
-      bridge.pending.set(message.id, message);
-      continue;
-    }
-
-    Atomics.wait(sleeper, 0, 0, 10);
-  }
-}
-
-// FUNCAO: createPreparedStatement.
-function createPreparedStatement(sql, inTransaction = false) {
-  const transformedSql = toPostgresSql(sql);
-  const execute = (params = []) =>
-    inTransaction
-      ? querySync(transformedSql, params)
-      : querySync(transformedSql, params);
-
-  return {
-    run(...params) {
-      const result = execute(params);
-      let lastInsertRowid = null;
-      if (result.rows && result.rows[0] && result.rows[0].id !== undefined) {
-        lastInsertRowid = Number(result.rows[0].id);
-      }
-      return {
-        changes: Number(result.rowCount || 0),
-        lastInsertRowid,
-      };
-    },
-    get(...params) {
-      const result = execute(params);
-      return result.rows[0] || undefined;
-    },
-    all(...params) {
-      const result = execute(params);
-      return result.rows || [];
-    },
-  };
-}
-
-// FUNCAO: createDbAdapter.
-function createDbAdapter() {
-  return {
-    // ADAPTADOR: executa SQL bruto (DDL/DML) sem retorno de linhas.
-    exec(sql) {
-      querySync(toPostgresSql(sql));
-    },
-    // ADAPTADOR: devolve statement com operacoes run/get/all.
-    prepare(sql) {
-      return createPreparedStatement(sql);
-    },
-  };
-}
 // SECAO: constantes de dominio e restricoes de valores aceitos no banco.
 
 const USER_ROLES = new Set(["admin", "tutor", "common"]);
@@ -430,7 +180,7 @@ function addDaysToDateKey(dateKey, days) {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
 
-function reportDueGraceDeadlineSql(dueAt, graceDays = 2) {
+function reportDueGraceDeadlineSql(dueAt, graceDays = 1) {
   const dateKey = String(dueAt || "").slice(0, 10);
   const deadlineDateKey = addDaysToDateKey(dateKey, graceDays);
   const fortnightEndDateKey = resolveFortnightEndFromDateKey(dateKey);
@@ -441,7 +191,7 @@ function reportDueGraceDeadlineSql(dueAt, graceDays = 2) {
   return effectiveDateKey ? `${effectiveDateKey} 23:59:59` : null;
 }
 
-function isReportDueOverdue(dueAt, nowSql, graceDays = 2) {
+function isReportDueOverdue(dueAt, nowSql, graceDays = 1) {
   const deadlineSql = reportDueGraceDeadlineSql(dueAt, graceDays);
   return Boolean(deadlineSql && nowSql && deadlineSql < nowSql);
 }
@@ -500,33 +250,33 @@ function getDb() {
 }
 
 // FUNCAO: ensureColumn.
-function ensureColumn(tableName, columnName, definition) {
-  const exists = querySync(
+async function ensureColumn(tableName, columnName, definition) {
+  const exists = (await postgres.query(
     `
       SELECT 1
       FROM information_schema.columns
-      WHERE table_schema = 'public'
+      WHERE table_schema = current_schema()
         AND table_name = $1
         AND column_name = $2
       LIMIT 1
     `,
     [tableName, columnName],
-  );
+  ));
 
   if (!exists.rows.length) {
-    querySync(`ALTER TABLE ${tableName === "user" ? '"user"' : tableName} ADD COLUMN ${columnName} ${definition}`);
+    (await postgres.query(`ALTER TABLE ${tableName === "user" ? '"user"' : tableName} ADD COLUMN ${columnName} ${definition}`));
   }
 }
 
 // FUNCAO: ensureSchema.
-function ensureSchema() {
+async function ensureSchema() {
   if (schemaEnsured) {
     return;
   }
 
   const db = getDb();
 
-  db.exec(`
+  (await db.exec(`
     CREATE TABLE IF NOT EXISTS member (
       id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
@@ -776,6 +526,19 @@ function ensureSchema() {
       FOREIGN KEY (tutor_user_id) REFERENCES "user"(id)
     );
 
+    CREATE TABLE IF NOT EXISTS chat_conversation (
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+      title TEXT,
+      created_by_user_id INTEGER NOT NULL,
+      conversation_kind TEXT NOT NULL DEFAULT 'direct',
+      theme_color TEXT,
+      avatar_url TEXT,
+      is_read_only INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      FOREIGN KEY (created_by_user_id) REFERENCES "user"(id)
+    );
+
     CREATE TABLE IF NOT EXISTS report_fortnight_tutor_note (
       id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
       tutor_user_id INTEGER NOT NULL,
@@ -808,19 +571,6 @@ function ensureSchema() {
       FOREIGN KEY (author_user_id) REFERENCES "user"(id),
       FOREIGN KEY (target_tutor_user_id) REFERENCES "user"(id),
       FOREIGN KEY (sent_to_chat_conversation_id) REFERENCES chat_conversation(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS chat_conversation (
-      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-      title TEXT,
-      created_by_user_id INTEGER NOT NULL,
-      conversation_kind TEXT NOT NULL DEFAULT 'direct',
-      theme_color TEXT,
-      avatar_url TEXT,
-      is_read_only INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT,
-      FOREIGN KEY (created_by_user_id) REFERENCES "user"(id)
     );
 
     CREATE TABLE IF NOT EXISTS chat_conversation_participant (
@@ -1006,61 +756,61 @@ function ensureSchema() {
     CREATE INDEX IF NOT EXISTS ix_task_audit_log_project_id ON task_audit_log(project_id);
     CREATE INDEX IF NOT EXISTS ix_task_audit_log_event_type ON task_audit_log(event_type);
     CREATE INDEX IF NOT EXISTS ix_task_audit_log_created_at ON task_audit_log(created_at);
-  `);
+  `));
 
-  ensureColumn("ata", "location_type", "TEXT");
-  ensureColumn("ata", "location_details", "TEXT");
-  ensureColumn("user", "name", "TEXT");
-  ensureColumn("user", "email", "TEXT");
-  ensureColumn("user", "is_active", "INTEGER NOT NULL DEFAULT 1");
-  ensureColumn("user", "deactivated_at", "TEXT");
-  ensureColumn("user", "role", "TEXT NOT NULL DEFAULT 'admin'");
-  ensureColumn("user", "member_id", "INTEGER");
-  ensureColumn("member", "photo", "TEXT");
-  ensureColumn("report_entry", "status", "TEXT NOT NULL DEFAULT 'in_progress'");
-  ensureColumn("estoque", "location", "TEXT");
-  ensureColumn("estoque", "category_id", "INTEGER");
-  ensureColumn("estoque", "location_id", "INTEGER");
-  ensureColumn("estoque", "item_type", "TEXT NOT NULL DEFAULT 'stock'");
-  ensureColumn("project", "primary_color", `TEXT NOT NULL DEFAULT '${DEFAULT_PROJECT_COLOR}'`);
-  ensureColumn("project_members", "is_coordinator", "INTEGER NOT NULL DEFAULT 0");
-  ensureColumn("report_week_goal", "planner_task_id", "INTEGER");
-  ensureColumn("report_week_goal", "goal_source", "TEXT NOT NULL DEFAULT 'manual'");
-  ensureColumn("planner_task", "status", "TEXT NOT NULL DEFAULT 'todo'");
-  ensureColumn("planner_task", "priority", "TEXT NOT NULL DEFAULT 'medium'");
-  ensureColumn("planner_task", "label", "TEXT");
-  ensureColumn("planner_task", "workflow_state", "TEXT NOT NULL DEFAULT 'active'");
-  ensureColumn("planner_task", "missed_at", "TEXT");
-  ensureColumn("planner_task", "last_extended_at", "TEXT");
-  ensureColumn("planner_task", "last_extended_by_user_id", "INTEGER");
-  ensureColumn("planner_task", "recurrence_interval_days", "INTEGER");
-  ensureColumn("planner_task", "recurrence_unit", "TEXT");
-  ensureColumn("planner_task", "recurrence_every", "INTEGER");
-  ensureColumn("planner_task", "recurrence_member_queue", "TEXT");
-  ensureColumn("planner_task", "recurrence_next_index", "INTEGER");
-  ensureColumn("task_audit_log", "member_id", "INTEGER");
-  ensureColumn("task_audit_log", "project_id", "INTEGER");
-  ensureColumn("report_fortnight_tutor_note", "sent_to_chat_at", "TEXT");
-  ensureColumn("report_fortnight_tutor_note", "sent_to_chat_conversation_id", "INTEGER");
-  ensureColumn("report_fortnight_member_note", "sent_to_chat_at", "TEXT");
-  ensureColumn("report_fortnight_member_note", "sent_to_chat_conversation_id", "INTEGER");
-  ensureColumn("report_week_goal", "due_at", "TEXT");
-  ensureColumn("report_week_goal", "task_state", "TEXT NOT NULL DEFAULT 'active'");
-  ensureColumn("report_week_goal", "completed_late", "INTEGER NOT NULL DEFAULT 0");
-  ensureColumn("report_week_goal_deletion_log", "deletion_reason", "TEXT");
-  ensureColumn("planner_task", "completed_late", "INTEGER NOT NULL DEFAULT 0");
-  ensureColumn("chat_conversation_participant", "last_read_at", "TEXT");
-  ensureColumn("chat_conversation", "conversation_kind", "TEXT NOT NULL DEFAULT 'direct'");
-  ensureColumn("chat_conversation", "theme_color", "TEXT");
-  ensureColumn("chat_conversation", "avatar_url", "TEXT");
-  ensureColumn("chat_conversation", "is_read_only", "INTEGER NOT NULL DEFAULT 0");
-  ensureColumn("event_attendee", "cpf", "TEXT");
-  ensureColumn("event_attendee", "attendee_id", "INTEGER");
-  ensureColumn("member_warning_event", "event_type", "TEXT NOT NULL DEFAULT 'count_changed'");
-  ensureColumn("member_warning_event", "target_event_id", "INTEGER REFERENCES member_warning_event(id)");
-  ensureColumn("member_warning_event", "previous_note", "TEXT");
+  (await ensureColumn("ata", "location_type", "TEXT"));
+  (await ensureColumn("ata", "location_details", "TEXT"));
+  (await ensureColumn("user", "name", "TEXT"));
+  (await ensureColumn("user", "email", "TEXT"));
+  (await ensureColumn("user", "is_active", "INTEGER NOT NULL DEFAULT 1"));
+  (await ensureColumn("user", "deactivated_at", "TEXT"));
+  (await ensureColumn("user", "role", "TEXT NOT NULL DEFAULT 'admin'"));
+  (await ensureColumn("user", "member_id", "INTEGER"));
+  (await ensureColumn("member", "photo", "TEXT"));
+  (await ensureColumn("report_entry", "status", "TEXT NOT NULL DEFAULT 'in_progress'"));
+  (await ensureColumn("estoque", "location", "TEXT"));
+  (await ensureColumn("estoque", "category_id", "INTEGER"));
+  (await ensureColumn("estoque", "location_id", "INTEGER"));
+  (await ensureColumn("estoque", "item_type", "TEXT NOT NULL DEFAULT 'stock'"));
+  (await ensureColumn("project", "primary_color", `TEXT NOT NULL DEFAULT '${DEFAULT_PROJECT_COLOR}'`));
+  (await ensureColumn("project_members", "is_coordinator", "INTEGER NOT NULL DEFAULT 0"));
+  (await ensureColumn("report_week_goal", "planner_task_id", "INTEGER"));
+  (await ensureColumn("report_week_goal", "goal_source", "TEXT NOT NULL DEFAULT 'manual'"));
+  (await ensureColumn("planner_task", "status", "TEXT NOT NULL DEFAULT 'todo'"));
+  (await ensureColumn("planner_task", "priority", "TEXT NOT NULL DEFAULT 'medium'"));
+  (await ensureColumn("planner_task", "label", "TEXT"));
+  (await ensureColumn("planner_task", "workflow_state", "TEXT NOT NULL DEFAULT 'active'"));
+  (await ensureColumn("planner_task", "missed_at", "TEXT"));
+  (await ensureColumn("planner_task", "last_extended_at", "TEXT"));
+  (await ensureColumn("planner_task", "last_extended_by_user_id", "INTEGER"));
+  (await ensureColumn("planner_task", "recurrence_interval_days", "INTEGER"));
+  (await ensureColumn("planner_task", "recurrence_unit", "TEXT"));
+  (await ensureColumn("planner_task", "recurrence_every", "INTEGER"));
+  (await ensureColumn("planner_task", "recurrence_member_queue", "TEXT"));
+  (await ensureColumn("planner_task", "recurrence_next_index", "INTEGER"));
+  (await ensureColumn("task_audit_log", "member_id", "INTEGER"));
+  (await ensureColumn("task_audit_log", "project_id", "INTEGER"));
+  (await ensureColumn("report_fortnight_tutor_note", "sent_to_chat_at", "TEXT"));
+  (await ensureColumn("report_fortnight_tutor_note", "sent_to_chat_conversation_id", "INTEGER"));
+  (await ensureColumn("report_fortnight_member_note", "sent_to_chat_at", "TEXT"));
+  (await ensureColumn("report_fortnight_member_note", "sent_to_chat_conversation_id", "INTEGER"));
+  (await ensureColumn("report_week_goal", "due_at", "TEXT"));
+  (await ensureColumn("report_week_goal", "task_state", "TEXT NOT NULL DEFAULT 'active'"));
+  (await ensureColumn("report_week_goal", "completed_late", "INTEGER NOT NULL DEFAULT 0"));
+  (await ensureColumn("report_week_goal_deletion_log", "deletion_reason", "TEXT"));
+  (await ensureColumn("planner_task", "completed_late", "INTEGER NOT NULL DEFAULT 0"));
+  (await ensureColumn("chat_conversation_participant", "last_read_at", "TEXT"));
+  (await ensureColumn("chat_conversation", "conversation_kind", "TEXT NOT NULL DEFAULT 'direct'"));
+  (await ensureColumn("chat_conversation", "theme_color", "TEXT"));
+  (await ensureColumn("chat_conversation", "avatar_url", "TEXT"));
+  (await ensureColumn("chat_conversation", "is_read_only", "INTEGER NOT NULL DEFAULT 0"));
+  (await ensureColumn("event_attendee", "cpf", "TEXT"));
+  (await ensureColumn("event_attendee", "attendee_id", "INTEGER"));
+  (await ensureColumn("member_warning_event", "event_type", "TEXT NOT NULL DEFAULT 'count_changed'"));
+  (await ensureColumn("member_warning_event", "target_event_id", "INTEGER REFERENCES member_warning_event(id)"));
+  (await ensureColumn("member_warning_event", "previous_note", "TEXT"));
 
-  db.exec(`
+  (await db.exec(`
     INSERT INTO attendee (name, cpf, email, badge_code)
     SELECT
       MIN(name) AS name,
@@ -1078,53 +828,53 @@ function ensureSchema() {
     FROM attendee a
     WHERE ea.attendee_id IS NULL
       AND ea.badge_code = a.badge_code;
-  `);
-  getDb().exec("CREATE INDEX IF NOT EXISTS ix_planner_task_status ON planner_task(status)");
-  getDb().exec("CREATE INDEX IF NOT EXISTS ix_planner_task_priority ON planner_task(priority)");
-  getDb().exec("CREATE INDEX IF NOT EXISTS ix_planner_task_workflow_state ON planner_task(workflow_state)");
-  getDb().exec("CREATE INDEX IF NOT EXISTS ix_planner_task_missed_at ON planner_task(missed_at)");
-  getDb().exec("CREATE INDEX IF NOT EXISTS ix_planner_task_completed_late ON planner_task(completed_late)");
-  getDb().exec("CREATE INDEX IF NOT EXISTS ix_report_week_goal_due_at ON report_week_goal(due_at)");
-  getDb().exec("CREATE INDEX IF NOT EXISTS ix_report_week_goal_task_state ON report_week_goal(task_state)");
-  getDb().exec("CREATE INDEX IF NOT EXISTS ix_report_week_goal_completed_late ON report_week_goal(completed_late)");
-  getDb().exec(
+  `));
+  (await getDb().exec("CREATE INDEX IF NOT EXISTS ix_planner_task_status ON planner_task(status)"));
+  (await getDb().exec("CREATE INDEX IF NOT EXISTS ix_planner_task_priority ON planner_task(priority)"));
+  (await getDb().exec("CREATE INDEX IF NOT EXISTS ix_planner_task_workflow_state ON planner_task(workflow_state)"));
+  (await getDb().exec("CREATE INDEX IF NOT EXISTS ix_planner_task_missed_at ON planner_task(missed_at)"));
+  (await getDb().exec("CREATE INDEX IF NOT EXISTS ix_planner_task_completed_late ON planner_task(completed_late)"));
+  (await getDb().exec("CREATE INDEX IF NOT EXISTS ix_report_week_goal_due_at ON report_week_goal(due_at)"));
+  (await getDb().exec("CREATE INDEX IF NOT EXISTS ix_report_week_goal_task_state ON report_week_goal(task_state)"));
+  (await getDb().exec("CREATE INDEX IF NOT EXISTS ix_report_week_goal_completed_late ON report_week_goal(completed_late)"));
+  (await getDb().exec(
     "CREATE INDEX IF NOT EXISTS ix_project_members_project_coordinator ON project_members(project_id, is_coordinator)",
-  );
-  getDb().exec(
+  ));
+  (await getDb().exec(
     "CREATE INDEX IF NOT EXISTS ix_project_members_member_project_coordinator ON project_members(member_id, project_id, is_coordinator)",
-  );
-  getDb().exec(
+  ));
+  (await getDb().exec(
     "CREATE INDEX IF NOT EXISTS ix_planner_task_project_open_due ON planner_task(project_id, is_completed, due_at)",
-  );
-  getDb().exec(
+  ));
+  (await getDb().exec(
     "CREATE INDEX IF NOT EXISTS ix_planner_task_member_open_due ON planner_task(assigned_member_id, is_completed, due_at)",
-  );
-  getDb().exec(
+  ));
+  (await getDb().exec(
     "CREATE INDEX IF NOT EXISTS ix_planner_task_active_due ON planner_task(workflow_state, is_completed, due_at)",
-  );
-  getDb().exec(
+  ));
+  (await getDb().exec(
     "CREATE INDEX IF NOT EXISTS ix_report_week_goal_member_project_week ON report_week_goal(member_id, project_id, week_start)",
-  );
-  getDb().exec(
+  ));
+  (await getDb().exec(
     "CREATE INDEX IF NOT EXISTS ix_chat_participant_conversation_user ON chat_conversation_participant(conversation_id, user_id)",
-  );
-  getDb().exec(
+  ));
+  (await getDb().exec(
     "CREATE INDEX IF NOT EXISTS ix_chat_message_conversation_author_sent ON chat_message(conversation_id, author_user_id, sent_at)",
-  );
-  getDb().exec(
+  ));
+  (await getDb().exec(
     "CREATE INDEX IF NOT EXISTS ix_member_warning_event_member_created ON member_warning_event(member_id, created_at, id)",
-  );
-  getDb().exec(
+  ));
+  (await getDb().exec(
     "CREATE INDEX IF NOT EXISTS ix_member_warning_restriction_member_started ON member_warning_restriction(member_id, started_at, id)",
-  );
-  getDb().exec(
+  ));
+  (await getDb().exec(
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_report_week_goal_planner_task_id ON report_week_goal(planner_task_id) WHERE planner_task_id IS NOT NULL",
-  );
-  getDb().exec(
+  ));
+  (await getDb().exec(
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_user_email_lower ON \"user\"(LOWER(email)) WHERE email IS NOT NULL AND LENGTH(TRIM(email)) > 0",
-  );
+  ));
 
-  db.prepare(
+  (await db.prepare(
     `
     UPDATE estoque
     SET item_type = CASE
@@ -1132,9 +882,9 @@ function ensureSchema() {
       ELSE 'stock'
     END
   `,
-  ).run();
+  ).run());
 
-  db.prepare(
+  (await db.prepare(
     `
     UPDATE user
     SET
@@ -1145,9 +895,9 @@ function ensureSchema() {
         ELSE 'admin'
       END
   `,
-  ).run();
+  ).run());
 
-  db.prepare(
+  (await db.prepare(
     `
     UPDATE planner_task
     SET
@@ -1176,9 +926,9 @@ function ensureSchema() {
         ELSE NULL
       END
   `,
-  ).run();
+  ).run());
 
-  db.exec(`
+  (await db.exec(`
     INSERT INTO inventory_category (name)
     SELECT DISTINCT TRIM(category)
     FROM estoque
@@ -1190,9 +940,9 @@ function ensureSchema() {
     FROM estoque
     WHERE location IS NOT NULL AND TRIM(location) <> ''
     ON CONFLICT (name) DO NOTHING;
-  `);
+  `));
 
-  db.prepare(
+  (await db.prepare(
     `
     UPDATE estoque
     SET category_id = (
@@ -1205,9 +955,9 @@ function ensureSchema() {
       AND category IS NOT NULL
       AND TRIM(category) <> ''
   `,
-  ).run();
+  ).run());
 
-  db.prepare(
+  (await db.prepare(
     `
     UPDATE estoque
     SET location_id = (
@@ -1220,9 +970,9 @@ function ensureSchema() {
       AND location IS NOT NULL
       AND TRIM(location) <> ''
   `,
-  ).run();
+  ).run());
 
-  db.prepare(
+  (await db.prepare(
     `
     UPDATE project
     SET primary_color = CASE
@@ -1230,9 +980,9 @@ function ensureSchema() {
       ELSE ?
     END
   `,
-  ).run(DEFAULT_PROJECT_COLOR);
+  ).run(DEFAULT_PROJECT_COLOR));
 
-  db.prepare(
+  (await db.prepare(
     `
     UPDATE report_entry
     SET status = CASE
@@ -1240,9 +990,9 @@ function ensureSchema() {
       ELSE 'in_progress'
     END
   `,
-  ).run();
+  ).run());
 
-  db.prepare(
+  (await db.prepare(
     `
     UPDATE report_week_goal
     SET goal_source = CASE
@@ -1250,9 +1000,9 @@ function ensureSchema() {
       ELSE 'manual'
     END
   `,
-  ).run();
+  ).run());
 
-  db.prepare(
+  (await db.prepare(
     `
     UPDATE report_week_goal
     SET task_state = CASE
@@ -1260,9 +1010,9 @@ function ensureSchema() {
       ELSE 'active'
     END
   `,
-  ).run();
+  ).run());
 
-  db.prepare(
+  (await db.prepare(
     `
     UPDATE report_week_goal
     SET completed_late = CASE
@@ -1270,16 +1020,16 @@ function ensureSchema() {
       ELSE 0
     END
   `,
-  ).run();
+  ).run());
 
-  repairFortnightOnTimeCompletions(db);
-  repairSubmittedFortnightTasksMarkedMissedEarly(db);
-  repairPendingFortnightTasksMarkedMissedEarly(db);
+  (await repairFortnightOnTimeCompletions(db));
+  (await repairSubmittedFortnightTasksMarkedMissedEarly(db));
+  (await repairPendingFortnightTasksMarkedMissedEarly(db));
   schemaEnsured = true;
 }
 
-function repairFortnightOnTimeCompletions(db = getDb()) {
-  const completedLateTasks = db
+async function repairFortnightOnTimeCompletions(db = getDb()) {
+  const completedLateTasks = (await db
     .prepare(
       `
       SELECT id, due_at, completed_at
@@ -1289,7 +1039,7 @@ function repairFortnightOnTimeCompletions(db = getDb()) {
         AND due_at IS NOT NULL
     `,
     )
-    .all();
+    .all());
 
   const taskIdsToRepair = completedLateTasks
     .filter((task) => {
@@ -1300,7 +1050,7 @@ function repairFortnightOnTimeCompletions(db = getDb()) {
 
   if (taskIdsToRepair.length) {
     const placeholders = taskIdsToRepair.map(() => "?").join(", ");
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE planner_task
       SET
@@ -1309,9 +1059,9 @@ function repairFortnightOnTimeCompletions(db = getDb()) {
         missed_at = NULL
       WHERE id IN (${placeholders})
     `,
-    ).run(...taskIdsToRepair);
+    ).run(...taskIdsToRepair));
 
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE report_week_goal
       SET
@@ -1319,10 +1069,10 @@ function repairFortnightOnTimeCompletions(db = getDb()) {
         task_state = 'active'
       WHERE planner_task_id IN (${placeholders})
     `,
-    ).run(...taskIdsToRepair);
+    ).run(...taskIdsToRepair));
   }
 
-  const completedLateGoals = db
+  const completedLateGoals = (await db
     .prepare(
       `
       SELECT id, due_at, completed_at
@@ -1333,7 +1083,7 @@ function repairFortnightOnTimeCompletions(db = getDb()) {
         AND planner_task_id IS NULL
     `,
     )
-    .all();
+    .all());
 
   const goalIdsToRepair = completedLateGoals
     .filter((goal) => {
@@ -1344,7 +1094,7 @@ function repairFortnightOnTimeCompletions(db = getDb()) {
 
   if (goalIdsToRepair.length) {
     const placeholders = goalIdsToRepair.map(() => "?").join(", ");
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE report_week_goal
       SET
@@ -1352,7 +1102,7 @@ function repairFortnightOnTimeCompletions(db = getDb()) {
         task_state = 'active'
       WHERE id IN (${placeholders})
     `,
-    ).run(...goalIdsToRepair);
+    ).run(...goalIdsToRepair));
   }
 
   return {
@@ -1361,8 +1111,8 @@ function repairFortnightOnTimeCompletions(db = getDb()) {
   };
 }
 
-function repairPendingFortnightTasksMarkedMissedEarly(db = getDb(), nowSql = toSqlDateTime(new Date())) {
-  const missedTasks = db
+async function repairPendingFortnightTasksMarkedMissedEarly(db = getDb(), nowSql = toSqlDateTime(new Date())) {
+  const missedTasks = (await db
     .prepare(
       `
       SELECT id, due_at
@@ -1372,7 +1122,7 @@ function repairPendingFortnightTasksMarkedMissedEarly(db = getDb(), nowSql = toS
         AND due_at IS NOT NULL
     `,
     )
-    .all();
+    .all());
 
   const taskIdsToRepair = missedTasks
     .filter((task) => !isReportDueOverdue(task.due_at, nowSql))
@@ -1380,7 +1130,7 @@ function repairPendingFortnightTasksMarkedMissedEarly(db = getDb(), nowSql = toS
 
   if (taskIdsToRepair.length) {
     const placeholders = taskIdsToRepair.map(() => "?").join(", ");
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE planner_task
       SET
@@ -1388,22 +1138,22 @@ function repairPendingFortnightTasksMarkedMissedEarly(db = getDb(), nowSql = toS
         missed_at = NULL
       WHERE id IN (${placeholders})
     `,
-    ).run(...taskIdsToRepair);
+    ).run(...taskIdsToRepair));
 
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE report_week_goal
       SET task_state = 'active'
       WHERE planner_task_id IN (${placeholders})
     `,
-    ).run(...taskIdsToRepair);
+    ).run(...taskIdsToRepair));
   }
 
   return { plannerTasks: taskIdsToRepair.length };
 }
 
-function repairSubmittedFortnightTasksMarkedMissedEarly(db = getDb()) {
-  const submittedGoals = db
+async function repairSubmittedFortnightTasksMarkedMissedEarly(db = getDb()) {
+  const submittedGoals = (await db
     .prepare(
       `
       SELECT
@@ -1420,7 +1170,7 @@ function repairSubmittedFortnightTasksMarkedMissedEarly(db = getDb()) {
         AND LENGTH(TRIM(g.description)) >= 10
     `,
     )
-    .all();
+    .all());
 
   const goalsToRepair = submittedGoals.filter((goal) => {
     const effectiveDeadline = reportDueGraceDeadlineSql(goal.due_at);
@@ -1431,9 +1181,9 @@ function repairSubmittedFortnightTasksMarkedMissedEarly(db = getDb()) {
     return { reportGoals: 0, plannerTasks: 0 };
   }
 
-  goalsToRepair.forEach((goal) => {
+  (await asyncArray.forEach(goalsToRepair, async (goal) => {
     const completedAt = String(goal.updated_at).replace(/(\.\d+)?[-+]\d{2}(?::?\d{2})?$/, "");
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE report_week_goal
       SET
@@ -1443,10 +1193,10 @@ function repairSubmittedFortnightTasksMarkedMissedEarly(db = getDb()) {
         task_state = 'active'
       WHERE id = ?
     `,
-    ).run(completedAt, goal.id);
+    ).run(completedAt, goal.id));
 
     if (goal.planner_task_id) {
-      db.prepare(
+      (await db.prepare(
         `
         UPDATE planner_task
         SET
@@ -1458,9 +1208,9 @@ function repairSubmittedFortnightTasksMarkedMissedEarly(db = getDb()) {
           missed_at = NULL
         WHERE id = ?
       `,
-      ).run(completedAt, goal.planner_task_id);
+      ).run(completedAt, goal.planner_task_id));
     }
-  });
+  }));
 
   return {
     reportGoals: goalsToRepair.length,
@@ -1471,23 +1221,7 @@ function repairSubmittedFortnightTasksMarkedMissedEarly(db = getDb()) {
 // SECAO: transacoes e mapeadores de linhas (SQL -> objetos de dominio).
 
 // FUNCAO: withTransaction.
-function withTransaction(callback) {
-  const db = getDb();
-  db.exec("BEGIN");
 
-  try {
-    const result = callback(db);
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch (rollbackError) {
-      console.error("Falha ao fazer rollback:", rollbackError);
-    }
-    throw error;
-  }
-}
 
 // FUNCAO: mapMember.
 function mapMember(row) {
@@ -1907,8 +1641,8 @@ function mapInventoryLoan(row) {
 // SECAO: operacoes de usuarios e vinculacao com membros.
 
 // FUNCAO: getUserById.
-function getUserById(id) {
-  const row = getDb()
+async function getUserById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -1927,14 +1661,14 @@ function getUserById(id) {
       WHERE u.id = ?
     `,
     )
-    .get(id);
+    .get(id));
 
   return mapUser(row);
 }
 
 // FUNCAO: getUserByUsername.
-function getUserByUsername(username) {
-  const row = getDb()
+async function getUserByUsername(username) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -1953,14 +1687,14 @@ function getUserByUsername(username) {
       WHERE u.username = ?
     `,
     )
-    .get(username);
+    .get(username));
 
   return mapUser(row);
 }
 
 // FUNCAO: listUsers.
-function listUsers() {
-  return getDb()
+async function listUsers() {
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -1979,12 +1713,12 @@ function listUsers() {
       ORDER BY LOWER(COALESCE(u.name, u.username)), LOWER(u.username)
     `,
     )
-    .all()
+    .all())
     .map(mapUser);
 }
 
 // FUNCAO: createUser.
-function createUser(
+async function createUser(
   username,
   passwordHash,
   {
@@ -1994,10 +1728,11 @@ function createUser(
     memberId = null,
   } = {},
 ) {
+  return withTransaction(async () => {
   const db = getDb();
   const normalizedRole = USER_ROLES.has(role) ? role : "common";
   const normalizedEmail = String(email || "").trim().toLowerCase() || null;
-  const result = db
+  const result = (await db
     .prepare(
       `
       INSERT INTO user (username, password_hash, name, email, role, member_id)
@@ -2011,53 +1746,64 @@ function createUser(
       normalizedEmail,
       normalizedRole,
       memberId,
-    );
+    ));
 
-  return getUserById(result.lastInsertRowid);
+  return (await getUserById(result.lastInsertRowid));
+
+  });
 }
 
 // FUNCAO: setUserMemberLink.
-function setUserMemberLink(userId, memberId = null) {
+async function setUserMemberLink(userId, memberId = null) {
+  return withTransaction(async () => {
   const db = getDb();
-  const current = getUserById(userId);
+  const current = (await getUserById(userId));
   if (!current) {
     return null;
   }
 
-  db.prepare("UPDATE user SET member_id = ? WHERE id = ?").run(memberId, userId);
-  return getUserById(userId);
+  (await db.prepare("UPDATE user SET member_id = ? WHERE id = ?").run(memberId, userId));
+  return (await getUserById(userId));
+
+  });
 }
 
 // FUNCAO: updateUserPassword.
-function updateUserPassword(userId, passwordHash) {
-  const current = getUserById(userId);
+async function updateUserPassword(userId, passwordHash) {
+  return withTransaction(async () => {
+  const current = (await getUserById(userId));
   if (!current) {
     return null;
   }
 
-  getDb()
+  (await getDb()
     .prepare("UPDATE user SET password_hash = ? WHERE id = ?")
-    .run(passwordHash, userId);
-  return getUserById(userId);
+    .run(passwordHash, userId));
+  return (await getUserById(userId));
+
+  });
 }
 
-function updateUserEmail(userId, email = null) {
-  const current = getUserById(userId);
+async function updateUserEmail(userId, email = null) {
+  return withTransaction(async () => {
+  const current = (await getUserById(userId));
   if (!current) {
     return null;
   }
 
   const normalizedEmail = String(email || "").trim().toLowerCase() || null;
-  getDb()
+  (await getDb()
     .prepare("UPDATE user SET email = ? WHERE id = ?")
-    .run(normalizedEmail, userId);
-  return getUserById(userId);
+    .run(normalizedEmail, userId));
+  return (await getUserById(userId));
+
+  });
 }
 
 // FUNCAO: deleteUser.
-function deleteUser(userId) {
-  return withTransaction((db) => {
-    const current = getUserById(userId);
+async function deleteUser(userId) {
+  return (await withTransaction(async (db) => {
+    const current = (await getUserById(userId));
     if (!current) {
       return { deleted: false, reason: "not_found" };
     }
@@ -2066,7 +1812,7 @@ function deleteUser(userId) {
       return { deleted: true, user: current, deactivated: true };
     }
 
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE user
       SET
@@ -2076,17 +1822,17 @@ function deleteUser(userId) {
         email = NULL
       WHERE id = ?
     `,
-    ).run(userId);
+    ).run(userId));
 
     return { deleted: true, user: current, deactivated: true };
-  });
+  }));
 }
 
 // SECAO: tabelas auxiliares do almoxarifado (categorias e locais).
 
 // FUNCAO: listInventoryCategories.
-function listInventoryCategories() {
-  return getDb()
+async function listInventoryCategories() {
+  return (await getDb()
     .prepare(
       `
       SELECT id, name
@@ -2094,13 +1840,13 @@ function listInventoryCategories() {
       ORDER BY LOWER(name), id
     `,
     )
-    .all()
+    .all())
     .map(mapInventoryCatalog);
 }
 
 // FUNCAO: getInventoryCategoryById.
-function getInventoryCategoryById(id) {
-  const row = getDb()
+async function getInventoryCategoryById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT id, name
@@ -2108,15 +1854,16 @@ function getInventoryCategoryById(id) {
       WHERE id = ?
     `,
     )
-    .get(id);
+    .get(id));
 
   return mapInventoryCatalog(row);
 }
 
 // FUNCAO: createInventoryCategory.
-function createInventoryCategory(name) {
+async function createInventoryCategory(name) {
+  return withTransaction(async () => {
   const db = getDb();
-  const result = db
+  const result = (await db
     .prepare(
       `
       INSERT INTO inventory_category (name)
@@ -2124,15 +1871,17 @@ function createInventoryCategory(name) {
       RETURNING id
     `,
     )
-    .run(name);
+    .run(name));
 
-  return getInventoryCategoryById(result.lastInsertRowid);
+  return (await getInventoryCategoryById(result.lastInsertRowid));
+
+  });
 }
 
 // FUNCAO: updateInventoryCategory.
-function updateInventoryCategory(id, name) {
-  return withTransaction((db) => {
-    const current = db
+async function updateInventoryCategory(id, name) {
+  return (await withTransaction(async (db) => {
+    const current = (await db
       .prepare(
         `
         SELECT id, name
@@ -2140,29 +1889,29 @@ function updateInventoryCategory(id, name) {
         WHERE id = ?
       `,
       )
-      .get(id);
+      .get(id));
 
     if (!current) {
       return null;
     }
 
-    db.prepare("UPDATE inventory_category SET name = ? WHERE id = ?").run(name, id);
-    db.prepare(
+    (await db.prepare("UPDATE inventory_category SET name = ? WHERE id = ?").run(name, id));
+    (await db.prepare(
       `
       UPDATE estoque
       SET category = ?
       WHERE category_id = ?
     `,
-    ).run(name, id);
+    ).run(name, id));
 
-    return getInventoryCategoryById(id);
-  });
+    return (await getInventoryCategoryById(id));
+  }));
 }
 
 // FUNCAO: deleteInventoryCategory.
-function deleteInventoryCategory(id) {
-  return withTransaction((db) => {
-    const current = db
+async function deleteInventoryCategory(id) {
+  return (await withTransaction(async (db) => {
+    const current = (await db
       .prepare(
         `
         SELECT id, name
@@ -2170,28 +1919,28 @@ function deleteInventoryCategory(id) {
         WHERE id = ?
       `,
       )
-      .get(id);
+      .get(id));
 
     if (!current) {
       return null;
     }
 
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE estoque
       SET category_id = NULL
       WHERE category_id = ?
     `,
-    ).run(id);
+    ).run(id));
 
-    db.prepare("DELETE FROM inventory_category WHERE id = ?").run(id);
+    (await db.prepare("DELETE FROM inventory_category WHERE id = ?").run(id));
     return mapInventoryCatalog(current);
-  });
+  }));
 }
 
 // FUNCAO: listInventoryLocations.
-function listInventoryLocations() {
-  return getDb()
+async function listInventoryLocations() {
+  return (await getDb()
     .prepare(
       `
       SELECT id, name
@@ -2199,13 +1948,13 @@ function listInventoryLocations() {
       ORDER BY LOWER(name), id
     `,
     )
-    .all()
+    .all())
     .map(mapInventoryCatalog);
 }
 
 // FUNCAO: getInventoryLocationById.
-function getInventoryLocationById(id) {
-  const row = getDb()
+async function getInventoryLocationById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT id, name
@@ -2213,15 +1962,16 @@ function getInventoryLocationById(id) {
       WHERE id = ?
     `,
     )
-    .get(id);
+    .get(id));
 
   return mapInventoryCatalog(row);
 }
 
 // FUNCAO: createInventoryLocation.
-function createInventoryLocation(name) {
+async function createInventoryLocation(name) {
+  return withTransaction(async () => {
   const db = getDb();
-  const result = db
+  const result = (await db
     .prepare(
       `
       INSERT INTO inventory_location (name)
@@ -2229,15 +1979,17 @@ function createInventoryLocation(name) {
       RETURNING id
     `,
     )
-    .run(name);
+    .run(name));
 
-  return getInventoryLocationById(result.lastInsertRowid);
+  return (await getInventoryLocationById(result.lastInsertRowid));
+
+  });
 }
 
 // FUNCAO: updateInventoryLocation.
-function updateInventoryLocation(id, name) {
-  return withTransaction((db) => {
-    const current = db
+async function updateInventoryLocation(id, name) {
+  return (await withTransaction(async (db) => {
+    const current = (await db
       .prepare(
         `
         SELECT id, name
@@ -2245,29 +1997,29 @@ function updateInventoryLocation(id, name) {
         WHERE id = ?
       `,
       )
-      .get(id);
+      .get(id));
 
     if (!current) {
       return null;
     }
 
-    db.prepare("UPDATE inventory_location SET name = ? WHERE id = ?").run(name, id);
-    db.prepare(
+    (await db.prepare("UPDATE inventory_location SET name = ? WHERE id = ?").run(name, id));
+    (await db.prepare(
       `
       UPDATE estoque
       SET location = ?
       WHERE location_id = ?
     `,
-    ).run(name, id);
+    ).run(name, id));
 
-    return getInventoryLocationById(id);
-  });
+    return (await getInventoryLocationById(id));
+  }));
 }
 
 // FUNCAO: deleteInventoryLocation.
-function deleteInventoryLocation(id) {
-  return withTransaction((db) => {
-    const current = db
+async function deleteInventoryLocation(id) {
+  return (await withTransaction(async (db) => {
+    const current = (await db
       .prepare(
         `
         SELECT id, name
@@ -2275,27 +2027,27 @@ function deleteInventoryLocation(id) {
         WHERE id = ?
       `,
       )
-      .get(id);
+      .get(id));
 
     if (!current) {
       return null;
     }
 
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE estoque
       SET location_id = NULL
       WHERE location_id = ?
     `,
-    ).run(id);
+    ).run(id));
 
-    db.prepare("DELETE FROM inventory_location WHERE id = ?").run(id);
+    (await db.prepare("DELETE FROM inventory_location WHERE id = ?").run(id));
     return mapInventoryCatalog(current);
-  });
+  }));
 }
 
 // FUNCAO: resolveInventoryCatalogEntry.
-function resolveInventoryCatalogEntry({
+async function resolveInventoryCatalogEntry({
   db,
   table,
   id,
@@ -2305,16 +2057,16 @@ function resolveInventoryCatalogEntry({
   const numericId = Number.isInteger(Number(id)) ? Number(id) : null;
 
   if (normalizedName) {
-    const existing = db
+    const existing = (await db
       .prepare(`SELECT id, name FROM ${table} WHERE LOWER(name) = LOWER(?)`)
-      .get(normalizedName);
+      .get(normalizedName));
     if (existing) {
       return mapInventoryCatalog(existing);
     }
 
-    const result = db
+    const result = (await db
       .prepare(`INSERT INTO ${table} (name) VALUES (?) RETURNING id`)
-      .run(normalizedName);
+      .run(normalizedName));
 
     return mapInventoryCatalog({
       id: Number(result.lastInsertRowid),
@@ -2323,9 +2075,9 @@ function resolveInventoryCatalogEntry({
   }
 
   if (numericId) {
-    const row = db
+    const row = (await db
       .prepare(`SELECT id, name FROM ${table} WHERE id = ?`)
-      .get(numericId);
+      .get(numericId));
 
     if (row) {
       return mapInventoryCatalog(row);
@@ -2347,32 +2099,32 @@ function trimCatalogValue(value) {
 // SECAO: operacoes de membros (cadastro, busca e desativacao).
 
 // FUNCAO: listActiveMembers.
-function listActiveMembers() {
-  return getDb()
+async function listActiveMembers() {
+  return (await getDb()
     .prepare(
       "SELECT id, name, photo, is_active FROM member WHERE is_active = 1 ORDER BY LOWER(name)",
     )
-    .all()
+    .all())
     .map(mapMember);
 }
 
 // FUNCAO: getMemberById.
-function getMemberById(id) {
-  const row = getDb()
+async function getMemberById(id) {
+  const row = (await getDb()
     .prepare("SELECT id, name, photo, is_active FROM member WHERE id = ?")
-    .get(id);
+    .get(id));
 
   return row ? mapMember(row) : null;
 }
 
 // FUNCAO: getMemberByName.
-function getMemberByName(name) {
+async function getMemberByName(name) {
   const normalized = String(name || "").trim();
   if (!normalized) {
     return null;
   }
 
-  const row = getDb()
+  const row = (await getDb()
     .prepare(
       `
       SELECT id, name, photo, is_active
@@ -2381,51 +2133,57 @@ function getMemberByName(name) {
       LIMIT 1
     `,
     )
-    .get(normalized);
+    .get(normalized));
 
   return mapMember(row);
 }
 
 // FUNCAO: createMember.
-function createMember(name, photo = null) {
+async function createMember(name, photo = null) {
+  return withTransaction(async () => {
   const db = getDb();
-  const result = db
+  const result = (await db
     .prepare("INSERT INTO member (name, photo, is_active) VALUES (?, ?, 1) RETURNING id")
-    .run(name, photo);
+    .run(name, photo));
 
-  return getMemberById(result.lastInsertRowid);
+  return (await getMemberById(result.lastInsertRowid));
+
+  });
 }
 
 // FUNCAO: updateMember.
-function updateMember(id, { name, photo }) {
-  getDb().prepare("UPDATE member SET name = ?, photo = ? WHERE id = ?").run(name, photo, id);
-  return getMemberById(id);
+async function updateMember(id, { name, photo }) {
+  return withTransaction(async () => {
+  (await getDb().prepare("UPDATE member SET name = ?, photo = ? WHERE id = ?").run(name, photo, id));
+  return (await getMemberById(id));
+
+  });
 }
 
 // FUNCAO: deactivateMember.
-function deactivateMember(id) {
-  return withTransaction((db) => {
-    db.prepare("UPDATE member SET is_active = 0 WHERE id = ?").run(id);
-    db.prepare("DELETE FROM project_members WHERE member_id = ?").run(id);
-    return getMemberById(id);
-  });
+async function deactivateMember(id) {
+  return (await withTransaction(async (db) => {
+    (await db.prepare("UPDATE member SET is_active = 0 WHERE id = ?").run(id));
+    (await db.prepare("DELETE FROM project_members WHERE member_id = ?").run(id));
+    return (await getMemberById(id));
+  }));
 }
 
 // SECAO: operacoes de projetos e relacoes projeto-membro.
 
 // FUNCAO: listProjectsBasic.
-function listProjectsBasic() {
-  return getDb()
+async function listProjectsBasic() {
+  return (await getDb()
     .prepare("SELECT id, name, logo, primary_color FROM project ORDER BY LOWER(name)")
-    .all()
+    .all())
     .map(mapProject);
 }
 
 // FUNCAO: getProjectMembers.
-function getProjectMembers(projectId, { activeOnly = false } = {}) {
+async function getProjectMembers(projectId, { activeOnly = false } = {}) {
   const where = activeOnly ? "AND m.is_active = 1" : "";
 
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT m.id, m.name, m.photo, m.is_active
@@ -2437,22 +2195,22 @@ function getProjectMembers(projectId, { activeOnly = false } = {}) {
       ORDER BY LOWER(m.name)
     `,
     )
-    .all(projectId)
+    .all(projectId))
     .map(mapMember);
 }
 
 // FUNCAO: getProjectById.
-function getProjectById(id) {
-  const projectRow = getDb()
+async function getProjectById(id) {
+  const projectRow = (await getDb()
     .prepare("SELECT id, name, logo, primary_color FROM project WHERE id = ?")
-    .get(id);
+    .get(id));
 
   if (!projectRow) {
     return null;
   }
 
   const project = mapProject(projectRow);
-  project.members = getProjectMembers(project.id);
+  project.members = (await getProjectMembers(project.id));
   project.active_members = project.members.filter((member) => member.is_active);
   project.active_member_ids = project.active_members.map((member) => member.id);
   project.coordinator_member_ids = project.members
@@ -2468,7 +2226,7 @@ function getProjectById(id) {
 }
 
 // FUNCAO: listProjectsWithMembers.
-function listProjectsWithMembers(projectIds = null) {
+async function listProjectsWithMembers(projectIds = null) {
   const ids = Array.isArray(projectIds)
     ? [...new Set(projectIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))]
     : null;
@@ -2476,7 +2234,7 @@ function listProjectsWithMembers(projectIds = null) {
     return [];
   }
   const projectFilter = ids ? `WHERE p.id IN (${ids.map(() => "?").join(", ")})` : "";
-  const rows = getDb()
+  const rows = (await getDb()
     .prepare(
       `
       SELECT
@@ -2496,7 +2254,7 @@ function listProjectsWithMembers(projectIds = null) {
       ORDER BY LOWER(p.name), LOWER(m.name), m.id
     `,
     )
-    .all(...(ids || []));
+    .all(...(ids || [])));
 
   const projectsById = new Map();
   rows.forEach((row) => {
@@ -2539,7 +2297,7 @@ function listProjectsWithMembers(projectIds = null) {
   });
 }
 
-function listProjectsWithMembersByIds(projectIds = []) {
+async function listProjectsWithMembersByIds(projectIds = []) {
   const ids = [...new Set(
     (Array.isArray(projectIds) ? projectIds : [])
       .map((id) => Number(id))
@@ -2548,70 +2306,70 @@ function listProjectsWithMembersByIds(projectIds = []) {
   if (!ids.length) {
     return [];
   }
-  return listProjectsWithMembers(ids);
+  return (await listProjectsWithMembers(ids));
 }
 
 // FUNCAO: createProject.
-function createProject({ name, logo, primaryColor, memberIds, coordinatorIds = null }) {
-  return withTransaction((db) => {
+async function createProject({ name, logo, primaryColor, memberIds, coordinatorIds = null }) {
+  return (await withTransaction(async (db) => {
     const uniqueMemberIds = [...new Set(memberIds)];
     const normalizedCoordinatorIds = Array.isArray(coordinatorIds)
       ? coordinatorIds.filter((memberId) => uniqueMemberIds.includes(memberId))
       : uniqueMemberIds.slice(0, 1);
     const coordinatorIdSet = new Set(normalizedCoordinatorIds);
 
-    const result = db
+    const result = (await db
       .prepare("INSERT INTO project (name, logo, primary_color) VALUES (?, ?, ?) RETURNING id")
-      .run(name, logo || null, normalizeProjectColor(primaryColor));
+      .run(name, logo || null, normalizeProjectColor(primaryColor)));
 
     const projectId = Number(result.lastInsertRowid);
     const insertMembership = db.prepare(
       "INSERT INTO project_members (project_id, member_id, is_coordinator) VALUES (?, ?, ?)",
     );
 
-    uniqueMemberIds.forEach((memberId) => {
-      insertMembership.run(projectId, memberId, coordinatorIdSet.has(memberId) ? 1 : 0);
-    });
+    for (const memberId of uniqueMemberIds) {
+      await insertMembership.run(projectId, memberId, coordinatorIdSet.has(memberId) ? 1 : 0);
+    }
 
-    return getProjectById(projectId);
-  });
+    return (await getProjectById(projectId));
+  }));
 }
 
 // FUNCAO: updateProject.
-function updateProject(
+async function updateProject(
   id,
   { name, logo, primaryColor, memberIds, coordinatorIds = null },
 ) {
-  return withTransaction((db) => {
+  return (await withTransaction(async (db) => {
     const uniqueMemberIds = [...new Set(memberIds)];
     const normalizedCoordinatorIds = Array.isArray(coordinatorIds)
       ? coordinatorIds.filter((memberId) => uniqueMemberIds.includes(memberId))
       : uniqueMemberIds.slice(0, 1);
     const coordinatorIdSet = new Set(normalizedCoordinatorIds);
 
-    db.prepare("UPDATE project SET name = ?, logo = ?, primary_color = ? WHERE id = ?").run(
+    (await db.prepare("UPDATE project SET name = ?, logo = ?, primary_color = ? WHERE id = ?").run(
       name,
       logo || null,
       normalizeProjectColor(primaryColor),
       id,
-    );
-    db.prepare("DELETE FROM project_members WHERE project_id = ?").run(id);
+    ));
+    (await db.prepare("DELETE FROM project_members WHERE project_id = ?").run(id));
 
     const insertMembership = db.prepare(
       "INSERT INTO project_members (project_id, member_id, is_coordinator) VALUES (?, ?, ?)",
     );
 
-    uniqueMemberIds.forEach((memberId) => {
-      insertMembership.run(id, memberId, coordinatorIdSet.has(memberId) ? 1 : 0);
-    });
+    for (const memberId of uniqueMemberIds) {
+      await insertMembership.run(id, memberId, coordinatorIdSet.has(memberId) ? 1 : 0);
+    }
 
-    return getProjectById(id);
-  });
+    return (await getProjectById(id));
+  }));
 }
 
 // FUNCAO: listProjectsForMember.
-function listProjectsForMember(memberId) {
-  return getDb()
+async function listProjectsForMember(memberId) {
+  return (await getDb()
     .prepare(
       `
       SELECT p.id, p.name, p.logo, p.primary_color
@@ -2621,13 +2379,13 @@ function listProjectsForMember(memberId) {
       ORDER BY LOWER(p.name)
     `,
     )
-    .all(memberId)
+    .all(memberId))
     .map(mapProject);
 }
 
 // FUNCAO: isProjectMember.
-function isProjectMember(projectId, memberId) {
-  const row = getDb()
+async function isProjectMember(projectId, memberId) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT 1 AS ok
@@ -2636,14 +2394,14 @@ function isProjectMember(projectId, memberId) {
       LIMIT 1
     `,
     )
-    .get(projectId, memberId);
+    .get(projectId, memberId));
 
   return Boolean(row?.ok);
 }
 
 // FUNCAO: isProjectCoordinator.
-function isProjectCoordinator(projectId, memberId) {
-  const row = getDb()
+async function isProjectCoordinator(projectId, memberId) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT 1 AS ok
@@ -2652,31 +2410,31 @@ function isProjectCoordinator(projectId, memberId) {
       LIMIT 1
     `,
     )
-    .get(projectId, memberId);
+    .get(projectId, memberId));
 
   return Boolean(row?.ok);
 }
 
 // FUNCAO: deleteProject.
-function deleteProject(id) {
-  return withTransaction((db) => {
-    db.prepare(
+async function deleteProject(id) {
+  return (await withTransaction(async (db) => {
+    (await db.prepare(
       "DELETE FROM ata_absent_justification WHERE ata_id IN (SELECT id FROM ata WHERE project_id = ?)",
-    ).run(id);
-    db.prepare(
+    ).run(id));
+    (await db.prepare(
       "DELETE FROM ata_present_members WHERE ata_id IN (SELECT id FROM ata WHERE project_id = ?)",
-    ).run(id);
-    db.prepare("DELETE FROM ata WHERE project_id = ?").run(id);
-    db.prepare("DELETE FROM project_members WHERE project_id = ?").run(id);
-    db.prepare("DELETE FROM project WHERE id = ?").run(id);
-  });
+    ).run(id));
+    (await db.prepare("DELETE FROM ata WHERE project_id = ?").run(id));
+    (await db.prepare("DELETE FROM project_members WHERE project_id = ?").run(id));
+    (await db.prepare("DELETE FROM project WHERE id = ?").run(id));
+  }));
 }
 
 // SECAO: operacoes de atas (consulta completa, criacao e exclusao).
 
 // FUNCAO: listRecentAtas.
-function listRecentAtas(limit = 5) {
-  return getDb()
+async function listRecentAtas(limit = 5) {
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -2692,7 +2450,7 @@ function listRecentAtas(limit = 5) {
       LIMIT ?
     `,
     )
-    .all(limit)
+    .all(limit))
     .map((row) => ({
       id: row.id,
       meeting_datetime: row.meeting_datetime,
@@ -2707,8 +2465,8 @@ function listRecentAtas(limit = 5) {
 }
 
 // FUNCAO: getAtaBaseById.
-function getAtaBaseById(id) {
-  const row = getDb()
+async function getAtaBaseById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -2727,7 +2485,7 @@ function getAtaBaseById(id) {
       WHERE a.id = ?
     `,
     )
-    .get(id);
+    .get(id));
 
   if (!row) {
     return null;
@@ -2744,8 +2502,8 @@ function getAtaBaseById(id) {
 }
 
 // FUNCAO: getAtaPresentMembers.
-function getAtaPresentMembers(ataId) {
-  return getDb()
+async function getAtaPresentMembers(ataId) {
+  return (await getDb()
     .prepare(
       `
       SELECT m.id, m.name, m.photo, m.is_active
@@ -2755,13 +2513,13 @@ function getAtaPresentMembers(ataId) {
       ORDER BY LOWER(m.name)
     `,
     )
-    .all(ataId)
+    .all(ataId))
     .map(mapMember);
 }
 
 // FUNCAO: getAtaAbsentJustifications.
-function getAtaAbsentJustifications(ataId) {
-  const rows = getDb()
+async function getAtaAbsentJustifications(ataId) {
+  const rows = (await getDb()
     .prepare(
       `
       SELECT aj.member_id, aj.justification, m.name
@@ -2771,7 +2529,7 @@ function getAtaAbsentJustifications(ataId) {
       ORDER BY LOWER(m.name)
     `,
     )
-    .all(ataId);
+    .all(ataId));
 
   const dictionary = {};
   rows.forEach((row) => {
@@ -2785,20 +2543,20 @@ function getAtaAbsentJustifications(ataId) {
 }
 
 // FUNCAO: getAtaById.
-function getAtaById(id) {
-  const ata = getAtaBaseById(id);
+async function getAtaById(id) {
+  const ata = (await getAtaBaseById(id));
   if (!ata) {
     return null;
   }
 
-  ata.present_members = getAtaPresentMembers(id);
-  const project = getProjectById(ata.project_id);
+  ata.present_members = (await getAtaPresentMembers(id));
+  const project = (await getProjectById(ata.project_id));
   const presentMemberIds = new Set(ata.present_members.map((member) => member.id));
   ata.absent_members = project.members.filter(
     (member) => !presentMemberIds.has(member.id),
   );
 
-  const justifications = getAtaAbsentJustifications(id);
+  const justifications = (await getAtaAbsentJustifications(id));
   ata.absent_justifications = justifications.rows;
   ata.absent_justifications_dict = justifications.dictionary;
 
@@ -2806,9 +2564,9 @@ function getAtaById(id) {
 }
 
 // FUNCAO: createAta.
-function createAta({ projectId, meetingDateTime, notes, presentMemberIds, justifications }) {
-  return withTransaction((db) => {
-    const result = db
+async function createAta({ projectId, meetingDateTime, notes, presentMemberIds, justifications }) {
+  return (await withTransaction(async (db) => {
+    const result = (await db
       .prepare(
         `
         INSERT INTO ata (meeting_datetime, location_type, location_details, notes, created_at, project_id)
@@ -2816,15 +2574,15 @@ function createAta({ projectId, meetingDateTime, notes, presentMemberIds, justif
         RETURNING id
       `,
       )
-      .run(meetingDateTime, notes, projectId);
+      .run(meetingDateTime, notes, projectId));
 
     const ataId = Number(result.lastInsertRowid);
     const insertPresent = db.prepare(
       "INSERT INTO ata_present_members (ata_id, member_id) VALUES (?, ?)",
     );
-    presentMemberIds.forEach((memberId) => {
-      insertPresent.run(ataId, memberId);
-    });
+    for (const memberId of presentMemberIds) {
+      await insertPresent.run(ataId, memberId);
+    }
 
     const insertJustification = db.prepare(
       `
@@ -2833,27 +2591,27 @@ function createAta({ projectId, meetingDateTime, notes, presentMemberIds, justif
     `,
     );
 
-    Object.entries(justifications).forEach(([memberId, justification]) => {
-      insertJustification.run(ataId, Number(memberId), justification);
-    });
+    for (const [memberId, justification] of Object.entries(justifications)) {
+      await insertJustification.run(ataId, Number(memberId), justification);
+    }
 
-    return getAtaById(ataId);
-  });
+    return (await getAtaById(ataId));
+  }));
 }
 
 // FUNCAO: deleteAta.
-function deleteAta(id) {
-  return withTransaction((db) => {
-    db.prepare("DELETE FROM ata_absent_justification WHERE ata_id = ?").run(id);
-    db.prepare("DELETE FROM ata_present_members WHERE ata_id = ?").run(id);
-    db.prepare("DELETE FROM ata WHERE id = ?").run(id);
-  });
+async function deleteAta(id) {
+  return (await withTransaction(async (db) => {
+    (await db.prepare("DELETE FROM ata_absent_justification WHERE ata_id = ?").run(id));
+    (await db.prepare("DELETE FROM ata_present_members WHERE ata_id = ?").run(id));
+    (await db.prepare("DELETE FROM ata WHERE id = ?").run(id));
+  }));
 }
 
 // SECAO: operacoes de relatorios semanais.
 
 // FUNCAO: createReportEntry.
-function createReportEntry({
+async function createReportEntry({
   projectId,
   memberId,
   createdByUserId = null,
@@ -2861,7 +2619,8 @@ function createReportEntry({
   status = "in_progress",
   content,
 }) {
-  const result = getDb()
+  return withTransaction(async () => {
+  const result = (await getDb()
     .prepare(
       `
       INSERT INTO report_entry (
@@ -2883,20 +2642,23 @@ function createReportEntry({
       weekStart,
       normalizeReportStatus(status),
       content,
-    );
+    ));
 
-  return getReportEntryById(result.lastInsertRowid);
+  return (await getReportEntryById(result.lastInsertRowid));
+
+  });
 }
 
 // FUNCAO: updateReportEntry.
-function updateReportEntry(id, { content, status = "in_progress" }) {
+async function updateReportEntry(id, { content, status = "in_progress" }) {
+  return withTransaction(async () => {
   const db = getDb();
-  const existing = getReportEntryById(id);
+  const existing = (await getReportEntryById(id));
   if (!existing) {
     return null;
   }
 
-  db.prepare(
+  (await db.prepare(
     `
     UPDATE report_entry
     SET
@@ -2906,25 +2668,30 @@ function updateReportEntry(id, { content, status = "in_progress" }) {
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `,
-  ).run(existing.week_start, normalizeReportStatus(status), content, id);
+  ).run(existing.week_start, normalizeReportStatus(status), content, id));
 
-  return getReportEntryById(id);
+  return (await getReportEntryById(id));
+
+  });
 }
 
 // FUNCAO: deleteReportEntry.
-function deleteReportEntry(id) {
-  const existing = getReportEntryById(id);
+async function deleteReportEntry(id) {
+  return withTransaction(async () => {
+  const existing = (await getReportEntryById(id));
   if (!existing) {
     return null;
   }
 
-  getDb().prepare("DELETE FROM report_entry WHERE id = ?").run(id);
+  (await getDb().prepare("DELETE FROM report_entry WHERE id = ?").run(id));
   return existing;
+
+  });
 }
 
 // FUNCAO: getReportEntryById.
-function getReportEntryById(id) {
-  const row = getDb()
+async function getReportEntryById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -2952,13 +2719,13 @@ function getReportEntryById(id) {
       WHERE r.id = ?
     `,
     )
-    .get(id);
+    .get(id));
 
   return mapReportEntry(row);
 }
 
 // FUNCAO: listReportEntries.
-function listReportEntries({
+async function listReportEntries({
   memberId = null,
   projectId = null,
   weekStart = null,
@@ -2990,7 +2757,7 @@ function listReportEntries({
 
   const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -3020,12 +2787,12 @@ function listReportEntries({
       LIMIT ?
     `,
     )
-    .all(...params, limit)
+    .all(...params, limit))
     .map(mapReportEntry);
 }
 
 // FUNCAO: listReportProjectsForMember.
-function listReportProjectsForMember(memberId, { weekStart = null, status = null } = {}) {
+async function listReportProjectsForMember(memberId, { weekStart = null, status = null } = {}) {
   const where = ["r.member_id = ?"];
   const params = [memberId];
   if (weekStart) {
@@ -3037,7 +2804,7 @@ function listReportProjectsForMember(memberId, { weekStart = null, status = null
     params.push(status);
   }
 
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT DISTINCT p.id, p.name, p.logo, p.primary_color
@@ -3047,12 +2814,12 @@ function listReportProjectsForMember(memberId, { weekStart = null, status = null
       ORDER BY LOWER(p.name)
     `,
     )
-    .all(...params)
+    .all(...params))
     .map(mapProject);
 }
 
 // FUNCAO: listReportWeeksForMember.
-function listReportWeeksForMember(memberId, { projectId = null, status = null } = {}) {
+async function listReportWeeksForMember(memberId, { projectId = null, status = null } = {}) {
   const where = ["member_id = ?"];
   const params = [memberId];
   if (projectId) {
@@ -3064,7 +2831,7 @@ function listReportWeeksForMember(memberId, { projectId = null, status = null } 
     params.push(status);
   }
 
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT DISTINCT week_start
@@ -3073,13 +2840,13 @@ function listReportWeeksForMember(memberId, { projectId = null, status = null } 
       ORDER BY week_start DESC
     `,
     )
-    .all(...params)
+    .all(...params))
     .map((row) => row.week_start);
 }
 
 // FUNCAO: listReportMembersSummary.
-function listReportMembersSummary() {
-  return getDb()
+async function listReportMembersSummary() {
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -3114,7 +2881,7 @@ function listReportMembersSummary() {
         LOWER(m.name)
     `,
     )
-    .all()
+    .all())
     .map((row) => ({
       id: row.id,
       name: row.name,
@@ -3127,7 +2894,7 @@ function listReportMembersSummary() {
 }
 
 // FUNCAO: createReportWeekGoal.
-function createReportWeekGoal({
+async function createReportWeekGoal({
   memberId,
   projectId,
   createdByUserId = null,
@@ -3141,7 +2908,8 @@ function createReportWeekGoal({
   isCompleted = false,
   completedLate = false,
 }) {
-  const result = getDb()
+  return withTransaction(async () => {
+  const result = (await getDb()
     .prepare(
       `
       INSERT INTO report_week_goal (
@@ -3177,14 +2945,16 @@ function createReportWeekGoal({
       isCompleted ? 1 : 0,
       isCompleted ? 1 : 0,
       completedLate ? 1 : 0,
-    );
+    ));
 
-  return getReportWeekGoalById(result.lastInsertRowid);
+  return (await getReportWeekGoalById(result.lastInsertRowid));
+
+  });
 }
 
 // FUNCAO: getReportWeekGoalById.
-function getReportWeekGoalById(id) {
-  const row = getDb()
+async function getReportWeekGoalById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -3222,14 +2992,14 @@ function getReportWeekGoalById(id) {
       LIMIT 1
     `,
     )
-    .get(id);
+    .get(id));
 
   return mapReportWeekGoal(row);
 }
 
 // FUNCAO: getReportWeekGoalByPlannerTaskId.
-function getReportWeekGoalByPlannerTaskId(plannerTaskId) {
-  const row = getDb()
+async function getReportWeekGoalByPlannerTaskId(plannerTaskId) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -3265,16 +3035,17 @@ function getReportWeekGoalByPlannerTaskId(plannerTaskId) {
       LIMIT 1
     `,
     )
-    .get(plannerTaskId);
+    .get(plannerTaskId));
 
   return mapReportWeekGoal(row);
 }
 
 // FUNCAO: syncReportWeekGoalFromPlannerTask.
-function syncReportWeekGoalFromPlannerTask(
+async function syncReportWeekGoalFromPlannerTask(
   plannerTask,
   { createdByUserId = null } = {},
 ) {
+  return withTransaction(async () => {
   if (!plannerTask?.id || !plannerTask?.assigned_member_id || !plannerTask?.project_id) {
     return null;
   }
@@ -3290,8 +3061,8 @@ function syncReportWeekGoalFromPlannerTask(
   const isCompleted = Boolean(plannerTask.is_completed);
   const completedLate = Boolean(plannerTask.completed_late);
 
-  return withTransaction((db) => {
-    const existing = db
+  return (await withTransaction(async (db) => {
+    const existing = (await db
       .prepare(
         `
         SELECT id
@@ -3300,10 +3071,10 @@ function syncReportWeekGoalFromPlannerTask(
         LIMIT 1
       `,
       )
-      .get(plannerTask.id);
+      .get(plannerTask.id));
 
     if (existing?.id) {
-      db.prepare(
+      (await db.prepare(
         `
         UPDATE report_week_goal
         SET
@@ -3337,22 +3108,22 @@ function syncReportWeekGoalFromPlannerTask(
         plannerTask.completed_at || null,
         completedLate ? 1 : 0,
         existing.id,
-      );
+      ));
 
       if (ownerUserId) {
-        db.prepare(
+        (await db.prepare(
           `
           UPDATE report_week_goal
           SET created_by_user_id = COALESCE(created_by_user_id, ?)
           WHERE id = ?
         `,
-        ).run(ownerUserId, existing.id);
+        ).run(ownerUserId, existing.id));
       }
 
-      return getReportWeekGoalById(existing.id);
+      return (await getReportWeekGoalById(existing.id));
     }
 
-    const inserted = db.prepare(
+    const inserted = (await db.prepare(
       `
       INSERT INTO report_week_goal (
         member_id,
@@ -3386,14 +3157,16 @@ function syncReportWeekGoalFromPlannerTask(
       isCompleted ? 1 : 0,
       plannerTask.completed_at || null,
       completedLate ? 1 : 0,
-    );
+    ));
 
-    return getReportWeekGoalById(inserted.lastInsertRowid);
+    return (await getReportWeekGoalById(inserted.lastInsertRowid));
+  }));
+
   });
 }
 
 // FUNCAO: updateReportWeekGoal.
-function updateReportWeekGoal(
+async function updateReportWeekGoal(
   id,
   {
     activity,
@@ -3404,12 +3177,13 @@ function updateReportWeekGoal(
     completedLate = null,
   },
 ) {
-  const existing = getReportWeekGoalById(id);
+  return withTransaction(async () => {
+  const existing = (await getReportWeekGoalById(id));
   if (!existing) {
     return null;
   }
 
-  getDb()
+  (await getDb()
     .prepare(
       `
       UPDATE report_week_goal
@@ -3443,19 +3217,22 @@ function updateReportWeekGoal(
       completedLate === null ? null : (completedLate ? 1 : 0),
       completedLate ? 1 : 0,
       id,
-    );
+    ));
 
-  return getReportWeekGoalById(id);
+  return (await getReportWeekGoalById(id));
+
+  });
 }
 
 // FUNCAO: attachPlannerTaskToReportWeekGoal.
-function attachPlannerTaskToReportWeekGoal(goalId, plannerTaskId) {
-  const existing = getReportWeekGoalById(goalId);
+async function attachPlannerTaskToReportWeekGoal(goalId, plannerTaskId) {
+  return withTransaction(async () => {
+  const existing = (await getReportWeekGoalById(goalId));
   if (!existing || !plannerTaskId) {
     return null;
   }
 
-  getDb()
+  (await getDb()
     .prepare(
       `
       UPDATE report_week_goal
@@ -3466,31 +3243,36 @@ function attachPlannerTaskToReportWeekGoal(goalId, plannerTaskId) {
       WHERE id = ?
     `,
     )
-    .run(plannerTaskId, goalId);
+    .run(plannerTaskId, goalId));
 
-  return getReportWeekGoalById(goalId);
+  return (await getReportWeekGoalById(goalId));
+
+  });
 }
 
 // FUNCAO: deleteReportWeekGoal.
-function deleteReportWeekGoal(id) {
-  const existing = getReportWeekGoalById(id);
+async function deleteReportWeekGoal(id) {
+  return withTransaction(async () => {
+  const existing = (await getReportWeekGoalById(id));
   if (!existing) {
     return null;
   }
 
-  getDb().prepare("DELETE FROM report_week_goal WHERE id = ?").run(id);
+  (await getDb().prepare("DELETE FROM report_week_goal WHERE id = ?").run(id));
   return existing;
+
+  });
 }
 
 // FUNCAO: deleteReportWeekGoalWithAudit.
-function deleteReportWeekGoalWithAudit(id, deletedByUserId, deletionReason = null) {
-  return withTransaction((db) => {
-    const existing = getReportWeekGoalById(id);
+async function deleteReportWeekGoalWithAudit(id, deletedByUserId, deletionReason = null) {
+  return (await withTransaction(async (db) => {
+    const existing = (await getReportWeekGoalById(id));
     if (!existing) {
       return null;
     }
 
-    db.prepare(
+    (await db.prepare(
       `
       INSERT INTO report_week_goal_deletion_log (
         goal_id,
@@ -3515,15 +3297,15 @@ function deleteReportWeekGoalWithAudit(id, deletedByUserId, deletionReason = nul
       existing.description || "",
       existing.completed_at,
       String(deletionReason || "").trim() || null,
-    );
+    ));
 
-    db.prepare("DELETE FROM report_week_goal WHERE id = ?").run(id);
+    (await db.prepare("DELETE FROM report_week_goal WHERE id = ?").run(id));
     return existing;
-  });
+  }));
 }
 
 // FUNCAO: listReportWeekGoalDeletionLogsForMember.
-function listReportWeekGoalDeletionLogsForMember(
+async function listReportWeekGoalDeletionLogsForMember(
   memberId,
   { projectId = null, limit = 30 } = {},
 ) {
@@ -3535,7 +3317,7 @@ function listReportWeekGoalDeletionLogsForMember(
     params.push(projectId);
   }
 
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -3563,12 +3345,12 @@ function listReportWeekGoalDeletionLogsForMember(
       LIMIT ?
     `,
     )
-    .all(...params, limit)
+    .all(...params, limit))
     .map(mapReportWeekGoalDeletionLog);
 }
 
 // FUNCAO: listReportWeekGoalsForMember.
-function listReportWeekGoalsForMember(
+async function listReportWeekGoalsForMember(
   memberId,
   { projectId = null, currentWeekStart = null, nowSql = null, limit = 200 } = {},
 ) {
@@ -3583,7 +3365,7 @@ function listReportWeekGoalsForMember(
   const overdueReferenceWeek = currentWeekStart || "9999-12-31";
   const referenceNow = nowSql || toSqlDateTime(new Date());
 
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -3620,7 +3402,7 @@ function listReportWeekGoalsForMember(
       LIMIT ?
     `,
     )
-    .all(...params, limit)
+    .all(...params, limit))
     .map((row) => {
       const mapped = mapReportWeekGoal(row);
       const byDueDate = Boolean(mapped.due_at && isReportDueOverdue(mapped.due_at, referenceNow));
@@ -3636,13 +3418,13 @@ function listReportWeekGoalsForMember(
 }
 
 // FUNCAO: listReportMonthGoalsForMember.
-function listReportMonthGoalsForMember(memberId, { monthKey, limit = 1200 } = {}) {
+async function listReportMonthGoalsForMember(memberId, { monthKey, limit = 1200 } = {}) {
   const normalizedMonth = String(monthKey || "").trim();
   if (!/^\d{4}-\d{2}$/.test(normalizedMonth)) {
     return [];
   }
 
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -3680,18 +3462,18 @@ function listReportMonthGoalsForMember(memberId, { monthKey, limit = 1200 } = {}
       LIMIT ?
     `,
     )
-    .all(memberId, normalizedMonth, limit)
+    .all(memberId, normalizedMonth, limit))
     .map(mapReportWeekGoal);
 }
 
 // FUNCAO: listReportMonthMemberNotesForPdf.
-function listReportMonthMemberNotesForPdf(memberId, { monthKey, limit = 200 } = {}) {
+async function listReportMonthMemberNotesForPdf(memberId, { monthKey, limit = 200 } = {}) {
   const normalizedMonth = String(monthKey || "").trim();
   if (!/^\d{4}-\d{2}$/.test(normalizedMonth)) {
     return [];
   }
 
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -3720,7 +3502,7 @@ function listReportMonthMemberNotesForPdf(memberId, { monthKey, limit = 200 } = 
       LIMIT ?
     `,
     )
-    .all(memberId, normalizedMonth, limit)
+    .all(memberId, normalizedMonth, limit))
     .map(mapReportFortnightMemberNote);
 }
 
@@ -3777,7 +3559,7 @@ function extractAuditTaskTitle(payload) {
 }
 
 // FUNCAO: createTaskAuditLog.
-function createTaskAuditLog({
+async function createTaskAuditLog({
   db = null,
   taskId = null,
   reportGoalId = null,
@@ -3788,13 +3570,14 @@ function createTaskAuditLog({
   payload = null,
   createdAt = null,
 }) {
+  return withTransaction(async () => {
   const targetDb = db || getDb();
   const normalizedEvent = String(eventType || "").trim().toLowerCase();
   if (!normalizedEvent) {
     return null;
   }
 
-  const result = targetDb
+  const result = (await targetDb
     .prepare(
       `
       INSERT INTO task_audit_log (
@@ -3820,13 +3603,15 @@ function createTaskAuditLog({
       actorUserId,
       serializeAuditPayload(payload),
       createdAt,
-    );
+    ));
 
   return Number(result.lastInsertRowid || 0);
+
+  });
 }
 
 // FUNCAO: listTaskAuditLogsForMember.
-function listTaskAuditLogsForMember(memberId, { projectId = null, limit = 120 } = {}) {
+async function listTaskAuditLogsForMember(memberId, { projectId = null, limit = 120 } = {}) {
   const where = ["l.member_id = ?"];
   const params = [memberId];
   if (projectId) {
@@ -3834,7 +3619,7 @@ function listTaskAuditLogsForMember(memberId, { projectId = null, limit = 120 } 
     params.push(projectId);
   }
 
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -3858,7 +3643,7 @@ function listTaskAuditLogsForMember(memberId, { projectId = null, limit = 120 } 
       LIMIT ?
     `,
     )
-    .all(...params, limit)
+    .all(...params, limit))
     .map((row) => {
       const payload = parseAuditPayload(row.payload_json);
       return {
@@ -3881,15 +3666,15 @@ function listTaskAuditLogsForMember(memberId, { projectId = null, limit = 120 } 
 }
 
 // FUNCAO: refreshPlannerTaskLifecycle.
-function refreshPlannerTaskLifecycle({ now = null, graceDays = 2 } = {}) {
+async function refreshPlannerTaskLifecycle({ now = null, graceDays = 1 } = {}) {
   const nowSql = toSqlDateTime(now || new Date());
   const nowDate = fromSqlDateTime(nowSql);
   if (!nowDate || !nowSql) {
     return { updatedCount: 0, taskIds: [] };
   }
 
-  return withTransaction((db) => {
-    const staleTasks = db
+  return (await withTransaction(async (db) => {
+    const staleTasks = (await db
       .prepare(
         `
         SELECT id, project_id, assigned_member_id, due_at
@@ -3900,11 +3685,11 @@ function refreshPlannerTaskLifecycle({ now = null, graceDays = 2 } = {}) {
         ORDER BY due_at ASC, id ASC
       `,
       )
-      .all(nowSql)
+      .all(nowSql))
       .filter((task) => isReportDueOverdue(task.due_at, nowSql, graceDays));
 
-    staleTasks.forEach((task) => {
-      db.prepare(
+    (await asyncArray.forEach(staleTasks, async (task) => {
+      (await db.prepare(
         `
         UPDATE planner_task
         SET
@@ -3913,9 +3698,9 @@ function refreshPlannerTaskLifecycle({ now = null, graceDays = 2 } = {}) {
           updated_at = ?
         WHERE id = ?
       `,
-      ).run(nowSql, nowSql, task.id);
+      ).run(nowSql, nowSql, task.id));
 
-      db.prepare(
+      (await db.prepare(
         `
         UPDATE report_week_goal
         SET
@@ -3924,9 +3709,9 @@ function refreshPlannerTaskLifecycle({ now = null, graceDays = 2 } = {}) {
           updated_at = CURRENT_TIMESTAMP
         WHERE planner_task_id = ?
       `,
-      ).run(task.due_at, task.id);
+      ).run(task.due_at, task.id));
 
-      createTaskAuditLog({
+      (await createTaskAuditLog({
         db,
         taskId: task.id,
         memberId: task.assigned_member_id,
@@ -3935,22 +3720,22 @@ function refreshPlannerTaskLifecycle({ now = null, graceDays = 2 } = {}) {
         actorUserId: null,
         payload: {
           due_at: task.due_at,
-          grace_days: Number(graceDays || 2),
+          grace_days: Number(graceDays),
           grace_until: reportDueGraceDeadlineSql(task.due_at, graceDays),
         },
         createdAt: nowSql,
-      });
-    });
+      }));
+    }));
 
     return {
       updatedCount: staleTasks.length,
       taskIds: staleTasks.map((task) => task.id),
     };
-  });
+  }));
 }
 
 // FUNCAO: createPlannerTask.
-function createPlannerTask({
+async function createPlannerTask({
   projectId,
   assignedMemberId,
   createdByUserId,
@@ -3967,13 +3752,14 @@ function createPlannerTask({
   recurrenceMemberQueue = null,
   recurrenceNextIndex = null,
 }) {
+  return withTransaction(async () => {
   const recurrenceQueueText = Array.isArray(recurrenceMemberQueue)
     ? recurrenceMemberQueue
       .map((item) => Number(item))
       .filter((item) => Number.isInteger(item) && item > 0)
       .join(",")
     : null;
-  const result = getDb()
+  const result = (await getDb()
     .prepare(
       `
       INSERT INTO planner_task (
@@ -4013,10 +3799,10 @@ function createPlannerTask({
       recurrenceEvery,
       recurrenceQueueText || null,
       recurrenceNextIndex,
-    );
-  const createdTask = getPlannerTaskById(result.lastInsertRowid);
+    ));
+  const createdTask = (await getPlannerTaskById(result.lastInsertRowid));
   if (createdTask) {
-    createTaskAuditLog({
+    (await createTaskAuditLog({
       taskId: createdTask.id,
       memberId: createdTask.assigned_member_id,
       projectId: createdTask.project_id,
@@ -4026,15 +3812,17 @@ function createPlannerTask({
         title: createdTask.title,
         due_at: createdTask.due_at,
       },
-    });
+    }));
   }
 
   return createdTask;
+
+  });
 }
 
 // FUNCAO: getPlannerTaskById.
-function getPlannerTaskById(id) {
-  const row = getDb()
+async function getPlannerTaskById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -4078,13 +3866,13 @@ function getPlannerTaskById(id) {
       LIMIT 1
     `,
     )
-    .get(id);
+    .get(id));
 
   return mapPlannerTask(row);
 }
 
 // FUNCAO: listPlannerTasks.
-function listPlannerTasks({
+async function listPlannerTasks({
   projectId = null,
   memberId = null,
   includeCompleted = true,
@@ -4130,7 +3918,7 @@ function listPlannerTasks({
 
   const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -4175,14 +3963,14 @@ function listPlannerTasks({
       LIMIT ?
     `,
     )
-    .all(...params, limit)
+    .all(...params, limit))
     .map(mapPlannerTask);
 }
 
 // FUNCAO: deletePlannerTask.
-function deletePlannerTask(id, { actorUserId = null, reportGoalId = null } = {}) {
-  return withTransaction((db) => {
-    const taskRow = db
+async function deletePlannerTask(id, { actorUserId = null, reportGoalId = null } = {}) {
+  return (await withTransaction(async (db) => {
+    const taskRow = (await db
       .prepare(
         `
         SELECT id, project_id, assigned_member_id, title, due_at, status, workflow_state
@@ -4191,12 +3979,12 @@ function deletePlannerTask(id, { actorUserId = null, reportGoalId = null } = {})
         LIMIT 1
       `,
       )
-      .get(id);
+      .get(id));
     if (!taskRow) {
       return false;
     }
 
-    createTaskAuditLog({
+    (await createTaskAuditLog({
       db,
       taskId: taskRow.id,
       reportGoalId,
@@ -4210,40 +3998,41 @@ function deletePlannerTask(id, { actorUserId = null, reportGoalId = null } = {})
         status: taskRow.status,
         workflow_state: taskRow.workflow_state,
       },
-    });
+    }));
 
-    db.prepare(
+    (await db.prepare(
       `
       DELETE FROM planner_task_completion_log
       WHERE task_id = ?
     `,
-    ).run(id);
+    ).run(id));
 
-    const result = db.prepare(
+    const result = (await db.prepare(
       `
       DELETE FROM planner_task
       WHERE id = ?
     `,
-    ).run(id);
+    ).run(id));
 
     return Number(result.changes || 0) > 0;
-  });
+  }));
 }
 
 // FUNCAO: updatePlannerTaskCompletion.
-function updatePlannerTaskCompletion({
+async function updatePlannerTaskCompletion({
   id,
   isCompleted,
   completedAt = null,
   updatedAt = null,
   actorUserId = null,
 }) {
-  const before = getPlannerTaskById(id);
+  return withTransaction(async () => {
+  const before = (await getPlannerTaskById(id));
   if (!before) {
     return null;
   }
 
-  const result = getDb()
+  const result = (await getDb()
     .prepare(
       `
       UPDATE planner_task
@@ -4264,15 +4053,15 @@ function updatePlannerTaskCompletion({
       isCompleted ? completedAt : null,
       updatedAt || null,
       id,
-    );
+    ));
 
   if (!Number(result.changes || 0)) {
     return null;
   }
 
-  const updated = getPlannerTaskById(id);
+  const updated = (await getPlannerTaskById(id));
   if (updated) {
-    createTaskAuditLog({
+    (await createTaskAuditLog({
       taskId: updated.id,
       memberId: updated.assigned_member_id,
       projectId: updated.project_id,
@@ -4283,27 +4072,30 @@ function updatePlannerTaskCompletion({
         to: updated.is_completed ? 1 : 0,
       },
       createdAt: updatedAt || completedAt || null,
-    });
+    }));
   }
 
   return updated;
+
+  });
 }
 
 // FUNCAO: updatePlannerTaskStatus.
-function updatePlannerTaskStatus({
+async function updatePlannerTaskStatus({
   id,
   status,
   updatedAt = null,
   actorUserId = null,
 }) {
-  const before = getPlannerTaskById(id);
+  return withTransaction(async () => {
+  const before = (await getPlannerTaskById(id));
   if (!before) {
     return null;
   }
 
   const normalizedStatus = normalizePlannerStatus(status);
   const isDone = normalizedStatus === "done";
-  const result = getDb()
+  const result = (await getDb()
     .prepare(
       `
       UPDATE planner_task
@@ -4322,15 +4114,15 @@ function updatePlannerTaskStatus({
       isDone ? 1 : 0,
       updatedAt || null,
       id,
-    );
+    ));
 
   if (!Number(result.changes || 0)) {
     return null;
   }
 
-  const updated = getPlannerTaskById(id);
+  const updated = (await getPlannerTaskById(id));
   if (updated) {
-    createTaskAuditLog({
+    (await createTaskAuditLog({
       taskId: updated.id,
       reportGoalId: null,
       memberId: updated.assigned_member_id,
@@ -4341,14 +4133,16 @@ function updatePlannerTaskStatus({
         from: before.status,
         to: updated.status,
       },
-    });
+    }));
   }
 
   return updated;
+
+  });
 }
 
 // FUNCAO: updatePlannerTaskDetails.
-function updatePlannerTaskDetails({
+async function updatePlannerTaskDetails({
   id,
   projectId,
   assignedMemberId,
@@ -4361,7 +4155,8 @@ function updatePlannerTaskDetails({
   updatedAt = null,
   actorUserId = null,
 }) {
-  const before = getPlannerTaskById(id);
+  return withTransaction(async () => {
+  const before = (await getPlannerTaskById(id));
   if (!before) {
     return null;
   }
@@ -4371,7 +4166,7 @@ function updatePlannerTaskDetails({
   const normalizedLabel = label === undefined ? before.label : label;
   const normalizedUpdatedAt = updatedAt || toSqlDateTime(new Date());
   const isDone = normalizedStatus === "done";
-  const result = getDb()
+  const result = (await getDb()
     .prepare(
       `
       UPDATE planner_task
@@ -4411,15 +4206,15 @@ function updatePlannerTaskDetails({
       isDone ? 1 : 0,
       normalizedUpdatedAt,
       id,
-    );
+    ));
 
   if (!Number(result.changes || 0)) {
     return null;
   }
 
-  const updated = getPlannerTaskById(id);
+  const updated = (await getPlannerTaskById(id));
   if (updated) {
-    createTaskAuditLog({
+    (await createTaskAuditLog({
       taskId: updated.id,
       memberId: updated.assigned_member_id,
       projectId: updated.project_id,
@@ -4447,14 +4242,16 @@ function updatePlannerTaskDetails({
           label: updated.label,
         },
       },
-    });
+    }));
   }
 
   return updated;
+
+  });
 }
 
 // FUNCAO: markPlannerTaskDoneLate.
-function markPlannerTaskDoneLate({
+async function markPlannerTaskDoneLate({
   id,
   actorUserId = null,
   completedAt = null,
@@ -4462,13 +4259,14 @@ function markPlannerTaskDoneLate({
   description = null,
   dueAt = null,
 }) {
-  const before = getPlannerTaskById(id);
+  return withTransaction(async () => {
+  const before = (await getPlannerTaskById(id));
   if (!before) {
     return null;
   }
 
   const doneAt = completedAt || toSqlDateTime(new Date());
-  const result = getDb()
+  const result = (await getDb()
     .prepare(
       `
       UPDATE planner_task
@@ -4486,15 +4284,15 @@ function markPlannerTaskDoneLate({
       WHERE id = ?
     `,
     )
-    .run(title, description, dueAt, doneAt, doneAt, id);
+    .run(title, description, dueAt, doneAt, doneAt, id));
 
   if (!Number(result.changes || 0)) {
     return null;
   }
 
-  const updated = getPlannerTaskById(id);
+  const updated = (await getPlannerTaskById(id));
   if (updated) {
-    createTaskAuditLog({
+    (await createTaskAuditLog({
       taskId: updated.id,
       memberId: updated.assigned_member_id,
       projectId: updated.project_id,
@@ -4505,27 +4303,30 @@ function markPlannerTaskDoneLate({
         missed_at: before.missed_at,
       },
       createdAt: doneAt,
-    });
+    }));
   }
 
   return updated;
+
+  });
 }
 
 // FUNCAO: extendPlannerTaskDeadline.
-function extendPlannerTaskDeadline({
+async function extendPlannerTaskDeadline({
   id,
   dueAt,
   actorUserId = null,
   reason = null,
   updatedAt = null,
 }) {
-  const before = getPlannerTaskById(id);
+  return withTransaction(async () => {
+  const before = (await getPlannerTaskById(id));
   if (!before) {
     return null;
   }
 
   const stamp = updatedAt || toSqlDateTime(new Date());
-  const result = getDb()
+  const result = (await getDb()
     .prepare(
       `
       UPDATE planner_task
@@ -4545,15 +4346,15 @@ function extendPlannerTaskDeadline({
       actorUserId,
       stamp,
       id,
-    );
+    ));
 
   if (!Number(result.changes || 0)) {
     return null;
   }
 
-  const updated = getPlannerTaskById(id);
+  const updated = (await getPlannerTaskById(id));
   if (updated) {
-    createTaskAuditLog({
+    (await createTaskAuditLog({
       taskId: updated.id,
       memberId: updated.assigned_member_id,
       projectId: updated.project_id,
@@ -4565,14 +4366,16 @@ function extendPlannerTaskDeadline({
         reason: String(reason || "").trim() || null,
       },
       createdAt: stamp,
-    });
+    }));
   }
 
   return updated;
+
+  });
 }
 
 // FUNCAO: createPlannerTaskCompletionLog.
-function createPlannerTaskCompletionLog({
+async function createPlannerTaskCompletionLog({
   taskId,
   projectId,
   assignedMemberId,
@@ -4585,7 +4388,8 @@ function createPlannerTaskCompletionLog({
   dueAt,
   completedAt,
 }) {
-  const result = getDb()
+  return withTransaction(async () => {
+  const result = (await getDb()
     .prepare(
       `
       INSERT INTO planner_task_completion_log (
@@ -4617,13 +4421,15 @@ function createPlannerTaskCompletionLog({
       label,
       dueAt,
       completedAt || null,
-    );
+    ));
 
   return Number(result.lastInsertRowid || 0);
+
+  });
 }
 
 // FUNCAO: listPlannerTaskCompletionLogs.
-function listPlannerTaskCompletionLogs({
+async function listPlannerTaskCompletionLogs({
   projectId = null,
   memberId = null,
   limit = 60,
@@ -4641,7 +4447,7 @@ function listPlannerTaskCompletionLogs({
   }
   const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -4671,14 +4477,14 @@ function listPlannerTaskCompletionLogs({
       LIMIT ?
     `,
     )
-    .all(...params, limit)
+    .all(...params, limit))
     .map(mapPlannerTaskCompletionLog);
 }
 
 // SECAO: inventario e movimentacoes (retirada, emprestimo, prorrogacao e devolucao).
 
 // FUNCAO: listInventoryItems.
-function listInventoryItems({ type = null } = {}) {
+async function listInventoryItems({ type = null } = {}) {
   const normalizedType = type ? normalizeInventoryType(type) : null;
   const sql = normalizedType
     ? `
@@ -4694,15 +4500,15 @@ function listInventoryItems({ type = null } = {}) {
     `;
 
   const rows = normalizedType
-    ? getDb().prepare(sql).all(normalizedType)
-    : getDb().prepare(sql).all();
+    ? (await getDb().prepare(sql).all(normalizedType))
+    : (await getDb().prepare(sql).all());
 
   return rows.map(mapInventoryItem);
 }
 
 // FUNCAO: getInventoryItemById.
-function getInventoryItemById(id) {
-  const row = getDb()
+async function getInventoryItemById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT id, name, item_type, category, category_id, location, location_id, amount, description
@@ -4710,13 +4516,13 @@ function getInventoryItemById(id) {
       WHERE id = ?
     `,
     )
-    .get(id);
+    .get(id));
 
   return mapInventoryItem(row);
 }
 
 // FUNCAO: createInventoryItem.
-function createInventoryItem({
+async function createInventoryItem({
   name,
   itemType = "stock",
   category,
@@ -4726,21 +4532,21 @@ function createInventoryItem({
   quantity,
   description,
 }) {
-  return withTransaction((db) => {
-    const resolvedCategory = resolveInventoryCatalogEntry({
+  return (await withTransaction(async (db) => {
+    const resolvedCategory = (await resolveInventoryCatalogEntry({
       db,
       table: "inventory_category",
       id: categoryId,
       name: category,
-    });
-    const resolvedLocation = resolveInventoryCatalogEntry({
+    }));
+    const resolvedLocation = (await resolveInventoryCatalogEntry({
       db,
       table: "inventory_location",
       id: locationId,
       name: location,
-    });
+    }));
 
-    const result = db
+    const result = (await db
       .prepare(
         `
         INSERT INTO estoque (name, item_type, category, category_id, location, location_id, amount, description)
@@ -4757,14 +4563,14 @@ function createInventoryItem({
         resolvedLocation?.id || null,
         quantity,
         description,
-      );
+      ));
 
-    return getInventoryItemById(result.lastInsertRowid);
-  });
+    return (await getInventoryItemById(result.lastInsertRowid));
+  }));
 }
 
 // FUNCAO: updateInventoryItem.
-function updateInventoryItem(
+async function updateInventoryItem(
   id,
   {
     name,
@@ -4777,8 +4583,8 @@ function updateInventoryItem(
     description,
   },
 ) {
-  return withTransaction((db) => {
-    const current = db
+  return (await withTransaction(async (db) => {
+    const current = (await db
       .prepare(
         `
         SELECT id, item_type
@@ -4786,7 +4592,7 @@ function updateInventoryItem(
         WHERE id = ?
       `,
       )
-      .get(id);
+      .get(id));
 
     if (!current) {
       return null;
@@ -4795,14 +4601,14 @@ function updateInventoryItem(
     const normalizedItemType = normalizeInventoryType(itemType);
     if (current.item_type === "patrimony" && normalizedItemType === "stock") {
       const activeLoanCount =
-        db.prepare(
+        (await db.prepare(
           `
           SELECT COUNT(*) AS total
           FROM inventory_loan
           WHERE item_id = ?
             AND returned_at IS NULL
         `,
-        ).get(id)?.total || 0;
+        ).get(id))?.total || 0;
 
       if (Number(activeLoanCount) > 0) {
         throw new Error(
@@ -4811,20 +4617,20 @@ function updateInventoryItem(
       }
     }
 
-    const resolvedCategory = resolveInventoryCatalogEntry({
+    const resolvedCategory = (await resolveInventoryCatalogEntry({
       db,
       table: "inventory_category",
       id: categoryId,
       name: category,
-    });
-    const resolvedLocation = resolveInventoryCatalogEntry({
+    }));
+    const resolvedLocation = (await resolveInventoryCatalogEntry({
       db,
       table: "inventory_location",
       id: locationId,
       name: location,
-    });
+    }));
 
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE estoque
       SET
@@ -4848,16 +4654,16 @@ function updateInventoryItem(
       quantity,
       description,
       id,
-    );
+    ));
 
-    return getInventoryItemById(id);
-  });
+    return (await getInventoryItemById(id));
+  }));
 }
 
 // FUNCAO: deleteInventoryItem.
-function deleteInventoryItem(id) {
-  return withTransaction((db) => {
-    const item = db
+async function deleteInventoryItem(id) {
+  return (await withTransaction(async (db) => {
+    const item = (await db
       .prepare(
         `
         SELECT id, name, item_type, category, category_id, location, location_id, amount, description
@@ -4865,14 +4671,14 @@ function deleteInventoryItem(id) {
         WHERE id = ?
       `,
       )
-      .get(id);
+      .get(id));
 
     if (!item) {
       return null;
     }
 
     const loanCount =
-      db.prepare("SELECT COUNT(*) AS total FROM inventory_loan WHERE item_id = ?").get(id)
+      (await db.prepare("SELECT COUNT(*) AS total FROM inventory_loan WHERE item_id = ?").get(id))
         ?.total || 0;
 
     if (loanCount > 0) {
@@ -4881,16 +4687,16 @@ function deleteInventoryItem(id) {
       );
     }
 
-    db.prepare("DELETE FROM pedido WHERE estoque_id = ?").run(id);
-    db.prepare("DELETE FROM estoque WHERE id = ?").run(id);
+    (await db.prepare("DELETE FROM pedido WHERE estoque_id = ?").run(id));
+    (await db.prepare("DELETE FROM estoque WHERE id = ?").run(id));
     return mapInventoryItem(item);
-  });
+  }));
 }
 
 // FUNCAO: withdrawInventoryItem.
-function withdrawInventoryItem({ nameOrCode, quantity, userId }) {
-  return withTransaction((db) => {
-    const item = db
+async function withdrawInventoryItem({ nameOrCode, quantity, userId }) {
+  return (await withTransaction(async (db) => {
+    const item = (await db
       .prepare(
         `
         SELECT id, name, item_type, category, category_id, location, location_id, amount, description
@@ -4901,7 +4707,7 @@ function withdrawInventoryItem({ nameOrCode, quantity, userId }) {
         LIMIT 1
       `,
       )
-      .get(nameOrCode, nameOrCode);
+      .get(nameOrCode, nameOrCode));
 
     if (!item) {
       return {
@@ -4915,13 +4721,13 @@ function withdrawInventoryItem({ nameOrCode, quantity, userId }) {
     }
 
     const newQuantity = item.amount - quantity;
-    db.prepare("UPDATE estoque SET amount = ? WHERE id = ?").run(newQuantity, item.id);
-    db.prepare(
+    (await db.prepare("UPDATE estoque SET amount = ? WHERE id = ?").run(newQuantity, item.id));
+    (await db.prepare(
       `
       INSERT INTO pedido (qtd_retirada, usuario_id, estoque_id, data_pedido)
       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
     `,
-    ).run(quantity, userId, item.id);
+    ).run(quantity, userId, item.id));
 
     return {
       success: true,
@@ -4931,12 +4737,12 @@ function withdrawInventoryItem({ nameOrCode, quantity, userId }) {
         amount: newQuantity,
       },
     };
-  });
+  }));
 }
 
 // FUNCAO: getInventoryLoanById.
-function getInventoryLoanById(id) {
-  const row = getDb()
+async function getInventoryLoanById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -4967,15 +4773,15 @@ function getInventoryLoanById(id) {
       WHERE l.id = ?
     `,
     )
-    .get(id);
+    .get(id));
 
   return mapInventoryLoan(row);
 }
 
 // FUNCAO: borrowInventoryItem.
-function borrowInventoryItem({ nameOrCode, quantity, userId }) {
-  return withTransaction((db) => {
-    const item = db
+async function borrowInventoryItem({ nameOrCode, quantity, userId }) {
+  return (await withTransaction(async (db) => {
+    const item = (await db
       .prepare(
         `
         SELECT id, name, item_type, category, category_id, location, location_id, amount, description
@@ -4986,7 +4792,7 @@ function borrowInventoryItem({ nameOrCode, quantity, userId }) {
         LIMIT 1
       `,
       )
-      .get(nameOrCode, nameOrCode);
+      .get(nameOrCode, nameOrCode));
 
     if (!item) {
       return {
@@ -5005,8 +4811,8 @@ function borrowInventoryItem({ nameOrCode, quantity, userId }) {
     const newQuantity = item.amount - quantity;
     const dueAt = addDaysToNow(7);
 
-    db.prepare("UPDATE estoque SET amount = ? WHERE id = ?").run(newQuantity, item.id);
-    const result = db
+    (await db.prepare("UPDATE estoque SET amount = ? WHERE id = ?").run(newQuantity, item.id));
+    const result = (await db
       .prepare(
         `
         INSERT INTO inventory_loan (
@@ -5020,24 +4826,24 @@ function borrowInventoryItem({ nameOrCode, quantity, userId }) {
         RETURNING id
       `,
       )
-      .run(item.id, userId, quantity, dueAt, dueAt);
+      .run(item.id, userId, quantity, dueAt, dueAt));
 
     return {
       success: true,
       message: "Empréstimo registrado com sucesso. A devolução está prevista para 7 dias.",
-      loan: getInventoryLoanById(result.lastInsertRowid),
+      loan: (await getInventoryLoanById(result.lastInsertRowid)),
       item: {
         ...item,
         amount: newQuantity,
       },
     };
-  });
+  }));
 }
 
 // FUNCAO: extendInventoryLoan.
-function extendInventoryLoan({ loanId, extraDays, actorUserId }) {
-  return withTransaction((db) => {
-    const loan = db
+async function extendInventoryLoan({ loanId, extraDays, actorUserId }) {
+  return (await withTransaction(async (db) => {
+    const loan = (await db
       .prepare(
         `
         SELECT id, due_at, returned_at
@@ -5045,7 +4851,7 @@ function extendInventoryLoan({ loanId, extraDays, actorUserId }) {
         WHERE id = ?
       `,
       )
-      .get(loanId);
+      .get(loanId));
 
     if (!loan) {
       return { success: false, message: "Empréstimo não encontrado." };
@@ -5062,26 +4868,26 @@ function extendInventoryLoan({ loanId, extraDays, actorUserId }) {
     dueDate.setDate(dueDate.getDate() + extraDays);
     const nextDueAt = toSqlDateTime(dueDate);
 
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE inventory_loan
       SET due_at = ?, extended_at = CURRENT_TIMESTAMP, extended_by_user_id = ?
       WHERE id = ?
     `,
-    ).run(nextDueAt, actorUserId, loanId);
+    ).run(nextDueAt, actorUserId, loanId));
 
     return {
       success: true,
       message: "Prazo do empréstimo prorrogado com sucesso.",
-      loan: getInventoryLoanById(loanId),
+      loan: (await getInventoryLoanById(loanId)),
     };
-  });
+  }));
 }
 
 // FUNCAO: returnInventoryLoan.
-function returnInventoryLoan({ loanId, actorUserId }) {
-  return withTransaction((db) => {
-    const loan = db
+async function returnInventoryLoan({ loanId, actorUserId }) {
+  return (await withTransaction(async (db) => {
+    const loan = (await db
       .prepare(
         `
         SELECT id, item_id, quantity, returned_at
@@ -5089,7 +4895,7 @@ function returnInventoryLoan({ loanId, actorUserId }) {
         WHERE id = ?
       `,
       )
-      .get(loanId);
+      .get(loanId));
 
     if (!loan) {
       return { success: false, message: "Empréstimo não encontrado." };
@@ -5102,32 +4908,32 @@ function returnInventoryLoan({ loanId, actorUserId }) {
       };
     }
 
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE estoque
       SET amount = amount + ?
       WHERE id = ?
     `,
-    ).run(loan.quantity, loan.item_id);
+    ).run(loan.quantity, loan.item_id));
 
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE inventory_loan
       SET returned_at = CURRENT_TIMESTAMP, returned_by_user_id = ?
       WHERE id = ?
     `,
-    ).run(actorUserId, loanId);
+    ).run(actorUserId, loanId));
 
     return {
       success: true,
       message: "Devolução registrada com sucesso.",
-      loan: getInventoryLoanById(loanId),
+      loan: (await getInventoryLoanById(loanId)),
     };
-  });
+  }));
 }
 
 // FUNCAO: listInventoryRequests.
-function listInventoryRequests(limit = null) {
+async function listInventoryRequests(limit = null) {
   const sql = `
     SELECT
       p.id AS pedido_id,
@@ -5146,8 +4952,8 @@ function listInventoryRequests(limit = null) {
   `;
 
   const rows = limit
-    ? getDb().prepare(`${sql} LIMIT ?`).all(limit)
-    : getDb().prepare(sql).all();
+    ? (await getDb().prepare(`${sql} LIMIT ?`).all(limit))
+    : (await getDb().prepare(sql).all());
 
   return rows.map((row) => ({
     pedido_id: row.pedido_id,
@@ -5163,7 +4969,7 @@ function listInventoryRequests(limit = null) {
 }
 
 // FUNCAO: listInventoryLoans.
-function listInventoryLoans({ status = null, limit = null } = {}) {
+async function listInventoryLoans({ status = null, limit = null } = {}) {
   const conditions = [];
   const params = [];
   const nowSql = toSqlDateTime(new Date());
@@ -5235,8 +5041,8 @@ function listInventoryLoans({ status = null, limit = null } = {}) {
 
   const statement = limit ? `${sql} LIMIT ?` : sql;
   const rows = limit
-    ? getDb().prepare(statement).all(...params, limit)
-    : getDb().prepare(statement).all(...params);
+    ? (await getDb().prepare(statement).all(...params, limit))
+    : (await getDb().prepare(statement).all(...params));
 
   return rows.map(mapInventoryLoan);
 }
@@ -5244,9 +5050,9 @@ function listInventoryLoans({ status = null, limit = null } = {}) {
 // SECAO: agregacoes para dashboard do almoxarifado.
 
 // FUNCAO: getInventoryDashboardData.
-function getInventoryDashboardData() {
+async function getInventoryDashboardData() {
   const db = getDb();
-  const inventoryStats = db
+  const summaryStats = (await db
     .prepare(
       `
       SELECT
@@ -5255,53 +5061,40 @@ function getInventoryDashboardData() {
         COALESCE(SUM(CASE WHEN item_type = 'patrimony' THEN 1 ELSE 0 END), 0) AS patrimony_item_count,
         COALESCE(SUM(amount), 0) AS total_units,
         COALESCE(SUM(CASE WHEN item_type = 'stock' THEN amount ELSE 0 END), 0) AS stock_units,
-        COALESCE(SUM(CASE WHEN item_type = 'patrimony' THEN amount ELSE 0 END), 0) AS patrimony_units
+        COALESCE(SUM(CASE WHEN item_type = 'patrimony' THEN amount ELSE 0 END), 0) AS patrimony_units,
+        (SELECT COUNT(*) FROM inventory_category) AS category_count,
+        (SELECT COUNT(*) FROM inventory_location) AS location_count,
+        (SELECT COUNT(*) FROM "user" WHERE is_active = 1) AS user_count,
+        (SELECT COUNT(*) FROM pedido) AS request_count,
+        (SELECT COUNT(*) FROM inventory_loan WHERE returned_at IS NULL) AS active_loan_count,
+        (
+          SELECT COUNT(*) FROM inventory_loan
+          WHERE returned_at IS NULL AND due_at < ?
+        ) AS overdue_loan_count
       FROM estoque
     `,
     )
-    .get() || {};
-  const catalogStats = db
-    .prepare(
-      `
-      SELECT
-        (SELECT COUNT(*) FROM inventory_category) AS category_count,
-        (SELECT COUNT(*) FROM inventory_location) AS location_count
-    `,
-    )
-    .get() || {};
-  const loanStats = db
-    .prepare(
-      `
-      SELECT
-        COUNT(*) AS active_loan_count,
-        COALESCE(SUM(CASE WHEN due_at < ? THEN 1 ELSE 0 END), 0) AS overdue_loan_count
-      FROM inventory_loan
-      WHERE returned_at IS NULL
-    `,
-    )
-    .get(toSqlDateTime(new Date())) || {};
+    .get(toSqlDateTime(new Date()))) || {};
   const summary = {
-    user_count:
-      db.prepare("SELECT COUNT(*) AS total FROM user WHERE is_active = 1").get()?.total || 0,
-    item_count: Number(inventoryStats.item_count || 0),
-    stock_item_count: Number(inventoryStats.stock_item_count || 0),
-    patrimony_item_count: Number(inventoryStats.patrimony_item_count || 0),
-    category_count: Number(catalogStats.category_count || 0),
-    location_count: Number(catalogStats.location_count || 0),
-    request_count:
-      db.prepare("SELECT COUNT(*) AS total FROM pedido").get()?.total || 0,
-    active_loan_count: Number(loanStats.active_loan_count || 0),
-    overdue_loan_count: Number(loanStats.overdue_loan_count || 0),
-    total_units: Number(inventoryStats.total_units || 0),
-    stock_units: Number(inventoryStats.stock_units || 0),
-    patrimony_units: Number(inventoryStats.patrimony_units || 0),
+    user_count: Number(summaryStats.user_count || 0),
+    item_count: Number(summaryStats.item_count || 0),
+    stock_item_count: Number(summaryStats.stock_item_count || 0),
+    patrimony_item_count: Number(summaryStats.patrimony_item_count || 0),
+    category_count: Number(summaryStats.category_count || 0),
+    location_count: Number(summaryStats.location_count || 0),
+    request_count: Number(summaryStats.request_count || 0),
+    active_loan_count: Number(summaryStats.active_loan_count || 0),
+    overdue_loan_count: Number(summaryStats.overdue_loan_count || 0),
+    total_units: Number(summaryStats.total_units || 0),
+    stock_units: Number(summaryStats.stock_units || 0),
+    patrimony_units: Number(summaryStats.patrimony_units || 0),
   };
 
   return {
     summary,
-    recent_requests: listInventoryRequests(6),
-    recent_loans: listInventoryLoans({ status: "active", limit: 6 }),
-    recent_users: db
+    recent_requests: (await listInventoryRequests(6)),
+    recent_loans: (await listInventoryLoans({ status: "active", limit: 6 })),
+    recent_users: (await db
       .prepare(
         `
         SELECT id, username, name, role, is_active, deactivated_at
@@ -5311,13 +5104,13 @@ function getInventoryDashboardData() {
         LIMIT 6
       `,
       )
-      .all()
+      .all())
       .map(mapUser),
   };
 }
 
-function listWritingGeneralEntries() {
-  return getDb()
+async function listWritingGeneralEntries() {
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -5334,12 +5127,12 @@ function listWritingGeneralEntries() {
       ORDER BY CAST(COALESCE(e.updated_at, e.created_at) AS timestamp) DESC, e.id DESC
     `,
     )
-    .all()
+    .all())
     .map(mapWritingGeneralEntry);
 }
 
-function getWritingGeneralEntryById(id) {
-  const row = getDb()
+async function getWritingGeneralEntryById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -5356,12 +5149,13 @@ function getWritingGeneralEntryById(id) {
       WHERE e.id = ?
     `,
     )
-    .get(id);
+    .get(id));
   return mapWritingGeneralEntry(row);
 }
 
-function createWritingGeneralEntry({ title, content, authorUserId }) {
-  const result = getDb()
+async function createWritingGeneralEntry({ title, content, authorUserId }) {
+  return withTransaction(async () => {
+  const result = (await getDb()
     .prepare(
       `
       INSERT INTO writing_general_entry (title, content, author_user_id)
@@ -5369,18 +5163,21 @@ function createWritingGeneralEntry({ title, content, authorUserId }) {
       RETURNING id
     `,
     )
-    .run(title, content, authorUserId);
-  return getWritingGeneralEntryById(result.lastInsertRowid);
+    .run(title, content, authorUserId));
+  return (await getWritingGeneralEntryById(result.lastInsertRowid));
+
+  });
 }
 
-function updateWritingGeneralEntry(id, { title, content }) {
-  const current = getWritingGeneralEntryById(id);
+async function updateWritingGeneralEntry(id, { title, content }) {
+  return withTransaction(async () => {
+  const current = (await getWritingGeneralEntryById(id));
   if (!current) {
     return null;
   }
 
   const updatedAt = toSqlDateTime(new Date());
-  getDb()
+  (await getDb()
     .prepare(
       `
       UPDATE writing_general_entry
@@ -5388,22 +5185,27 @@ function updateWritingGeneralEntry(id, { title, content }) {
       WHERE id = ?
     `,
     )
-    .run(title, content, updatedAt, id);
-  return getWritingGeneralEntryById(id);
+    .run(title, content, updatedAt, id));
+  return (await getWritingGeneralEntryById(id));
+
+  });
 }
 
-function deleteWritingGeneralEntry(id) {
-  const current = getWritingGeneralEntryById(id);
+async function deleteWritingGeneralEntry(id) {
+  return withTransaction(async () => {
+  const current = (await getWritingGeneralEntryById(id));
   if (!current) {
     return null;
   }
 
-  getDb().prepare("DELETE FROM writing_general_entry WHERE id = ?").run(id);
+  (await getDb().prepare("DELETE FROM writing_general_entry WHERE id = ?").run(id));
   return current;
+
+  });
 }
 
-function listWritingTutorPrivateEntries(tutorUserId) {
-  return getDb()
+async function listWritingTutorPrivateEntries(tutorUserId) {
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -5421,12 +5223,12 @@ function listWritingTutorPrivateEntries(tutorUserId) {
       ORDER BY CAST(COALESCE(e.updated_at, e.created_at) AS timestamp) DESC, e.id DESC
     `,
     )
-    .all(tutorUserId)
+    .all(tutorUserId))
     .map(mapWritingTutorPrivateEntry);
 }
 
-function getWritingTutorPrivateEntryById(id) {
-  const row = getDb()
+async function getWritingTutorPrivateEntryById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -5443,12 +5245,13 @@ function getWritingTutorPrivateEntryById(id) {
       WHERE e.id = ?
     `,
     )
-    .get(id);
+    .get(id));
   return mapWritingTutorPrivateEntry(row);
 }
 
-function createWritingTutorPrivateEntry({ title, content, tutorUserId }) {
-  const result = getDb()
+async function createWritingTutorPrivateEntry({ title, content, tutorUserId }) {
+  return withTransaction(async () => {
+  const result = (await getDb()
     .prepare(
       `
       INSERT INTO writing_tutor_private_entry (title, content, tutor_user_id)
@@ -5456,18 +5259,21 @@ function createWritingTutorPrivateEntry({ title, content, tutorUserId }) {
       RETURNING id
     `,
     )
-    .run(title, content, tutorUserId);
-  return getWritingTutorPrivateEntryById(result.lastInsertRowid);
+    .run(title, content, tutorUserId));
+  return (await getWritingTutorPrivateEntryById(result.lastInsertRowid));
+
+  });
 }
 
-function updateWritingTutorPrivateEntry(id, { title, content }) {
-  const current = getWritingTutorPrivateEntryById(id);
+async function updateWritingTutorPrivateEntry(id, { title, content }) {
+  return withTransaction(async () => {
+  const current = (await getWritingTutorPrivateEntryById(id));
   if (!current) {
     return null;
   }
 
   const updatedAt = toSqlDateTime(new Date());
-  getDb()
+  (await getDb()
     .prepare(
       `
       UPDATE writing_tutor_private_entry
@@ -5475,22 +5281,27 @@ function updateWritingTutorPrivateEntry(id, { title, content }) {
       WHERE id = ?
     `,
     )
-    .run(title, content, updatedAt, id);
-  return getWritingTutorPrivateEntryById(id);
+    .run(title, content, updatedAt, id));
+  return (await getWritingTutorPrivateEntryById(id));
+
+  });
 }
 
-function deleteWritingTutorPrivateEntry(id) {
-  const current = getWritingTutorPrivateEntryById(id);
+async function deleteWritingTutorPrivateEntry(id) {
+  return withTransaction(async () => {
+  const current = (await getWritingTutorPrivateEntryById(id));
   if (!current) {
     return null;
   }
 
-  getDb().prepare("DELETE FROM writing_tutor_private_entry WHERE id = ?").run(id);
+  (await getDb().prepare("DELETE FROM writing_tutor_private_entry WHERE id = ?").run(id));
   return current;
+
+  });
 }
 
-function getReportFortnightTutorNote({ tutorUserId, memberId, weekStart }) {
-  const row = getDb()
+async function getReportFortnightTutorNote({ tutorUserId, memberId, weekStart }) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -5515,18 +5326,19 @@ function getReportFortnightTutorNote({ tutorUserId, memberId, weekStart }) {
       LIMIT 1
     `,
     )
-    .get(tutorUserId, memberId, weekStart);
+    .get(tutorUserId, memberId, weekStart));
   return mapReportFortnightTutorNote(row);
 }
 
-function upsertReportFortnightTutorNote({ tutorUserId, memberId, weekStart, content }) {
+async function upsertReportFortnightTutorNote({ tutorUserId, memberId, weekStart, content }) {
+  return withTransaction(async () => {
   const normalizedContent = String(content || "").trim();
   if (!normalizedContent) {
     throw new Error("Conteúdo da avaliação é obrigatório.");
   }
-  const current = getReportFortnightTutorNote({ tutorUserId, memberId, weekStart });
+  const current = (await getReportFortnightTutorNote({ tutorUserId, memberId, weekStart }));
   if (!current) {
-    const inserted = getDb()
+    const inserted = (await getDb()
       .prepare(
         `
         INSERT INTO report_fortnight_tutor_note (tutor_user_id, member_id, week_start, content)
@@ -5534,16 +5346,16 @@ function upsertReportFortnightTutorNote({ tutorUserId, memberId, weekStart, cont
         RETURNING id
       `,
       )
-      .run(tutorUserId, memberId, weekStart, normalizedContent);
-    return getReportFortnightTutorNote({
+      .run(tutorUserId, memberId, weekStart, normalizedContent));
+    return (await getReportFortnightTutorNote({
       tutorUserId,
       memberId,
       weekStart,
-    }) || mapReportFortnightTutorNote({ id: inserted.lastInsertRowid });
+    })) || mapReportFortnightTutorNote({ id: inserted.lastInsertRowid });
   }
 
   const updatedAt = toSqlDateTime(new Date());
-  getDb()
+  (await getDb()
     .prepare(
       `
       UPDATE report_fortnight_tutor_note
@@ -5551,13 +5363,16 @@ function upsertReportFortnightTutorNote({ tutorUserId, memberId, weekStart, cont
       WHERE id = ?
     `,
     )
-    .run(normalizedContent, updatedAt, current.id);
-  return getReportFortnightTutorNote({ tutorUserId, memberId, weekStart });
+    .run(normalizedContent, updatedAt, current.id));
+  return (await getReportFortnightTutorNote({ tutorUserId, memberId, weekStart }));
+
+  });
 }
 
-function markReportFortnightTutorNoteAsSentToChat(id, conversationId) {
+async function markReportFortnightTutorNoteAsSentToChat(id, conversationId) {
+  return withTransaction(async () => {
   const now = toSqlDateTime(new Date());
-  getDb()
+  (await getDb()
     .prepare(
       `
       UPDATE report_fortnight_tutor_note
@@ -5565,11 +5380,13 @@ function markReportFortnightTutorNoteAsSentToChat(id, conversationId) {
       WHERE id = ?
     `,
     )
-    .run(now, conversationId, id);
+    .run(now, conversationId, id));
+
+  });
 }
 
-function getReportFortnightMemberNote({ memberId, weekStart }) {
-  const row = getDb()
+async function getReportFortnightMemberNote({ memberId, weekStart }) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -5597,24 +5414,25 @@ function getReportFortnightMemberNote({ memberId, weekStart }) {
       LIMIT 1
     `,
     )
-    .get(memberId, weekStart);
+    .get(memberId, weekStart));
   return mapReportFortnightMemberNote(row);
 }
 
-function upsertReportFortnightMemberNote({
+async function upsertReportFortnightMemberNote({
   memberId,
   authorUserId,
   targetTutorUserId = null,
   weekStart,
   content,
 }) {
+  return withTransaction(async () => {
   const normalizedContent = String(content || "").trim();
   if (!normalizedContent) {
     throw new Error("Conteúdo do complemento é obrigatório.");
   }
-  const current = getReportFortnightMemberNote({ memberId, weekStart });
+  const current = (await getReportFortnightMemberNote({ memberId, weekStart }));
   if (!current) {
-    getDb()
+    (await getDb()
       .prepare(
         `
         INSERT INTO report_fortnight_member_note (
@@ -5627,12 +5445,12 @@ function upsertReportFortnightMemberNote({
         VALUES (?, ?, ?, ?, ?)
       `,
       )
-      .run(memberId, authorUserId, targetTutorUserId, weekStart, normalizedContent);
-    return getReportFortnightMemberNote({ memberId, weekStart });
+      .run(memberId, authorUserId, targetTutorUserId, weekStart, normalizedContent));
+    return (await getReportFortnightMemberNote({ memberId, weekStart }));
   }
 
   const updatedAt = toSqlDateTime(new Date());
-  getDb()
+  (await getDb()
     .prepare(
       `
       UPDATE report_fortnight_member_note
@@ -5643,13 +5461,16 @@ function upsertReportFortnightMemberNote({
       WHERE id = ?
     `,
     )
-    .run(normalizedContent, targetTutorUserId, updatedAt, current.id);
-  return getReportFortnightMemberNote({ memberId, weekStart });
+    .run(normalizedContent, targetTutorUserId, updatedAt, current.id));
+  return (await getReportFortnightMemberNote({ memberId, weekStart }));
+
+  });
 }
 
-function markReportFortnightMemberNoteAsSentToChat(id, conversationId) {
+async function markReportFortnightMemberNoteAsSentToChat(id, conversationId) {
+  return withTransaction(async () => {
   const now = toSqlDateTime(new Date());
-  getDb()
+  (await getDb()
     .prepare(
       `
       UPDATE report_fortnight_member_note
@@ -5657,11 +5478,13 @@ function markReportFortnightMemberNoteAsSentToChat(id, conversationId) {
       WHERE id = ?
     `,
     )
-    .run(now, conversationId, id);
+    .run(now, conversationId, id));
+
+  });
 }
 
-function getUserByMemberId(memberId) {
-  const row = getDb()
+async function getUserByMemberId(memberId) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -5681,18 +5504,18 @@ function getUserByMemberId(memberId) {
       LIMIT 1
     `,
     )
-    .get(memberId);
+    .get(memberId));
   return mapUser(row);
 }
 
 // Garante um usuario remetente fixo para mensagens automaticas administrativas.
-function getOrCreateAdministrativeUser() {
+async function getOrCreateAdministrativeUser() {
   const username = "administrativo";
-  const existing = getUserByUsername(username);
+  const existing = (await getUserByUsername(username));
   if (existing) {
     return existing;
   }
-  const result = getDb()
+  const result = (await getDb()
     .prepare(
       `
       INSERT INTO "user" (username, password_hash, name, role, is_active)
@@ -5700,8 +5523,8 @@ function getOrCreateAdministrativeUser() {
       RETURNING id
     `,
     )
-    .run(username, "system-administrativo", "Administrativo");
-  return getUserById(result.lastInsertRowid);
+    .run(username, "system-administrativo", "Administrativo"));
+  return (await getUserById(result.lastInsertRowid));
 }
 
 // Data atual da aplicacao na timezone configurada, usada por ciclos automaticos.
@@ -5722,13 +5545,14 @@ function getCurrentWarningCycleDateKey() {
 }
 
 // Aplica a regra semestral: zera quem tem menos de 3 e inicia restricao para quem tem 3.
-function applySemiannualMemberWarningCycle() {
+async function applySemiannualMemberWarningCycle() {
+  return withTransaction(async () => {
   const cycleDateKey = getCurrentWarningCycleDateKey();
   if (!cycleDateKey) {
     return { applied: false };
   }
 
-  const alreadyApplied = getDb()
+  const alreadyApplied = (await getDb()
     .prepare(
       `
       SELECT 1 AS ok
@@ -5737,17 +5561,17 @@ function applySemiannualMemberWarningCycle() {
       LIMIT 1
     `,
     )
-    .get(cycleDateKey);
+    .get(cycleDateKey));
 
   if (alreadyApplied?.ok) {
     return { applied: false, cycleDateKey };
   }
 
-  const adminUser = getOrCreateAdministrativeUser();
+  const adminUser = (await getOrCreateAdministrativeUser());
   const cycleStartedAt = `${cycleDateKey} 00:00:00`;
 
-  return withTransaction((db) => {
-    const rows = db
+  return (await withTransaction(async (db) => {
+    const rows = (await db
       .prepare(
         `
         SELECT
@@ -5773,45 +5597,47 @@ function applySemiannualMemberWarningCycle() {
         ORDER BY m.id ASC
       `,
       )
-      .all();
+      .all());
 
-    rows.forEach((row) => {
+    (await asyncArray.forEach(rows, async (row) => {
       const currentCount = Math.max(0, Math.min(3, Number(row.warning_count || 0)));
       if (currentCount >= 3) {
         const hasRestrictionForCycle =
           row.restriction_started_at
           && String(row.restriction_started_at).slice(0, 10) >= cycleDateKey;
         if (!hasRestrictionForCycle) {
-          db.prepare(
+          (await db.prepare(
             `
             INSERT INTO member_warning_restriction (member_id, started_by_user_id, started_at)
             VALUES (?, ?, ?)
           `,
-          ).run(row.id, adminUser.id, cycleStartedAt);
+          ).run(row.id, adminUser.id, cycleStartedAt));
         }
         return;
       }
 
       if (currentCount > 0) {
-        db.prepare(
+        (await db.prepare(
           `
           INSERT INTO member_warning_event
             (member_id, actor_user_id, previous_count, new_count, note, event_type)
           VALUES (?, ?, ?, 0, ?, 'cycle_reset')
         `,
-        ).run(row.id, adminUser.id, currentCount, `Zerado automaticamente no ciclo semestral ${cycleDateKey}.`);
+        ).run(row.id, adminUser.id, currentCount, `Zerado automaticamente no ciclo semestral ${cycleDateKey}.`));
       }
-    });
+    }));
 
-    db.prepare("INSERT INTO member_warning_cycle (cycle_date) VALUES (?)").run(cycleDateKey);
+    (await db.prepare("INSERT INTO member_warning_cycle (cycle_date) VALUES (?)").run(cycleDateKey));
 
     return { applied: true, cycleDateKey };
+  }));
+
   });
 }
 
 // Confere se o usuario pertence a um projeto pelo nome, usado em permissoes simples.
-function isUserMemberOfProjectName(userId, projectName) {
-  const row = getDb()
+async function isUserMemberOfProjectName(userId, projectName) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT 1 AS ok
@@ -5823,7 +5649,7 @@ function isUserMemberOfProjectName(userId, projectName) {
       LIMIT 1
     `,
     )
-    .get(userId, String(projectName || "").trim());
+    .get(userId, String(projectName || "").trim()));
   return Boolean(row?.ok);
 }
 
@@ -5852,8 +5678,8 @@ function mapMemberWarningState(row) {
 }
 
 // Busca a quantidade atual de advertencias e o ultimo periodo de restricao de um membro.
-function getMemberWarningState(memberId) {
-  const row = getDb()
+async function getMemberWarningState(memberId) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -5873,19 +5699,19 @@ function getMemberWarningState(memberId) {
         ) AS restriction_started_at
     `,
     )
-    .get(memberId, memberId);
+    .get(memberId, memberId));
   return mapMemberWarningState(row);
 }
 
 // Lista o historico completo de advertencias, incluindo edicoes e exclusoes logicas.
-function listMemberWarningEvents(memberId) {
-  const events = getDb().prepare(`
+async function listMemberWarningEvents(memberId) {
+  const events = (await getDb().prepare(`
     SELECT e.*, COALESCE(NULLIF(u.name, ''), u.username) AS actor_name
     FROM member_warning_event e
     LEFT JOIN "user" u ON u.id = e.actor_user_id
     WHERE e.member_id = ?
     ORDER BY e.id DESC
-  `).all(memberId);
+  `).all(memberId));
   return events.map((event) => {
     const revisions = events.filter((revision) => revision.target_event_id === event.id);
     const latestEdit = revisions.find((revision) => revision.event_type === "edited");
@@ -5899,80 +5725,87 @@ function listMemberWarningEvents(memberId) {
 }
 
 // Historico append-only: registros antigos e motivos originais nunca sao sobrescritos.
-function mutateMemberWarning({ memberId, actorUserId, action, warningId, note = "" }) {
+async function mutateMemberWarning({ memberId, actorUserId, action, warningId, note = "" }) {
   const validationError = (message) => Object.assign(new Error(message), { warningValidation: true });
-  if (!isUserMemberOfProjectName(actorUserId, "Administrativo")) {
+  if (!(await isUserMemberOfProjectName(actorUserId, "Administrativo"))) {
     throw validationError("Somente membros do Administrativo podem alterar advertências.");
   }
   if (!["add", "edit", "delete"].includes(action)) throw validationError("Ação inválida.");
   const normalizedNote = String(note || "").trim();
   if (normalizedNote.length > 300) throw validationError("O motivo deve ter no máximo 300 caracteres.");
-  return withTransaction((db) => {
-    if (!db.prepare("SELECT id FROM member WHERE id = ? FOR UPDATE").get(memberId)) {
+  return (await withTransaction(async (db) => {
+    if (!(await db.prepare("SELECT id FROM member WHERE id = ? FOR UPDATE").get(memberId))) {
       throw validationError("Membro inválido.");
     }
-    const current = getMemberWarningState(memberId);
-    const target = action === "add" ? null : listMemberWarningEvents(memberId).find((event) => event.id === warningId && event.is_warning && !event.is_deleted);
+    const current = (await getMemberWarningState(memberId));
+    const target = action === "add" ? null : (await listMemberWarningEvents(memberId)).find((event) => event.id === warningId && event.is_warning && !event.is_deleted);
     if (action !== "add" && !target) throw validationError("Advertência não encontrada ou já excluída.");
     if (action === "add" && current.warning_count >= 3) throw validationError("Este membro já possui 3 advertências.");
     const count = action === "add" ? current.warning_count + 1
       : action === "delete" ? Math.max(0, current.warning_count - (target.new_count - target.previous_count))
         : current.warning_count;
-    db.prepare(`
+    (await db.prepare(`
       INSERT INTO member_warning_event
         (member_id, actor_user_id, previous_count, new_count, note, event_type, target_event_id, previous_note)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(memberId, actorUserId, current.warning_count, count,
       action === "delete" ? target.current_note : normalizedNote,
-      { add: "added", edit: "edited", delete: "deleted" }[action], target?.id || null, target?.current_note || null);
+      { add: "added", edit: "edited", delete: "deleted" }[action], target?.id || null, target?.current_note || null));
     return { warning_count: count, previous_count: current.warning_count, changed: true };
-  });
+  }));
 }
 
 // Ajusta a quantidade total registrando uma nova linha de auditoria.
-function setMemberWarningCount({ memberId, actorUserId, newCount, note = "" }) {
+async function setMemberWarningCount({ memberId, actorUserId, newCount, note = "" }) {
+  return withTransaction(async () => {
   const normalizedCount = Math.max(0, Math.min(3, Number(newCount)));
   if (!Number.isInteger(normalizedCount)) {
     throw new Error("Quantidade de advertencias invalida.");
   }
-  const current = getMemberWarningState(memberId);
+  const current = (await getMemberWarningState(memberId));
   if (current.warning_count === normalizedCount) {
     return { ...current, changed: false };
   }
-  getDb()
+  (await getDb()
     .prepare(
       `
       INSERT INTO member_warning_event (member_id, actor_user_id, previous_count, new_count, note)
       VALUES (?, ?, ?, ?, ?)
     `,
     )
-    .run(memberId, actorUserId, current.warning_count, normalizedCount, String(note || "").trim() || null);
-  return { ...getMemberWarningState(memberId), previous_count: current.warning_count, changed: true };
+    .run(memberId, actorUserId, current.warning_count, normalizedCount, String(note || "").trim() || null));
+  return { ...(await getMemberWarningState(memberId)), previous_count: current.warning_count, changed: true };
+
+  });
 }
 
 // Inicia manualmente o periodo de acompanhamento/restricao de 365 dias.
-function startMemberWarningRestriction({ memberId, actorUserId, startedAt = null }) {
+async function startMemberWarningRestriction({ memberId, actorUserId, startedAt = null }) {
+  return withTransaction(async () => {
   const normalizedStartedAt = startedAt || toSqlDateTime(new Date());
-  getDb()
+  (await getDb()
     .prepare(
       `
       INSERT INTO member_warning_restriction (member_id, started_by_user_id, started_at)
       VALUES (?, ?, ?)
     `,
     )
-    .run(memberId, actorUserId, normalizedStartedAt);
-  return getMemberWarningState(memberId);
+    .run(memberId, actorUserId, normalizedStartedAt));
+  return (await getMemberWarningState(memberId));
+
+  });
 }
 
 // Cria conversa read-only do Administrativo avisando todos os usuarios sobre 3 advertencias.
-function createWarningBroadcastForMember(member) {
+async function createWarningBroadcastForMember(member) {
+  return withTransaction(async () => {
   if (!member?.id) {
     return null;
   }
-  const adminUser = getOrCreateAdministrativeUser();
-  const users = listUsers();
+  const adminUser = (await getOrCreateAdministrativeUser());
+  const users = (await listUsers());
   const participantUserIds = users.map((user) => user.id);
-  const conversation = createChatConversation({
+  const conversation = (await createChatConversation({
     title: "Administrativo",
     createdByUserId: adminUser.id,
     participantUserIds,
@@ -5980,18 +5813,20 @@ function createWarningBroadcastForMember(member) {
     themeColor: "#f1a7a6",
     avatarUrl: "img/logoadm.png",
     isReadOnly: true,
-  });
-  createChatMessage({
+  }));
+  (await createChatMessage({
     conversationId: conversation.id,
     authorUserId: adminUser.id,
     text: `${member.name} atingiu 3 advertencias.`,
-  });
+  }));
   return conversation;
+
+  });
 }
 
 // Procura conversa direta existente entre dois usuarios para evitar duplicidade.
-function findDirectConversationByUsers(userAId, userBId) {
-  const row = getDb()
+async function findDirectConversationByUsers(userAId, userBId) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT c.id
@@ -6011,9 +5846,9 @@ function findDirectConversationByUsers(userAId, userBId) {
       LIMIT 1
     `,
     )
-    .get(userAId, userBId);
+    .get(userAId, userBId));
 
-  return row?.id ? getChatConversationById(row.id) : null;
+  return row?.id ? (await getChatConversationById(row.id)) : null;
 }
 
 function mapChatConversation(row) {
@@ -6061,7 +5896,7 @@ function mapChatMessage(row) {
   };
 }
 
-function createChatConversation({
+async function createChatConversation({
   title = null,
   createdByUserId,
   participantUserIds = [],
@@ -6070,6 +5905,7 @@ function createChatConversation({
   avatarUrl = null,
   isReadOnly = false,
 }) {
+  return withTransaction(async () => {
   const uniqueParticipantIds = [...new Set(
     participantUserIds
       .map((id) => Number(id))
@@ -6084,9 +5920,9 @@ function createChatConversation({
     throw new Error("A conversa deve ter exatamente duas pessoas.");
   }
 
-  return withTransaction((db) => {
+  return (await withTransaction(async (db) => {
     const now = toSqlDateTime(new Date());
-    const created = db.prepare(
+    const created = (await db.prepare(
       `
       INSERT INTO chat_conversation (title, created_by_user_id, conversation_kind, theme_color, avatar_url, is_read_only)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -6099,24 +5935,26 @@ function createChatConversation({
       themeColor || null,
       avatarUrl || null,
       isReadOnly ? 1 : 0,
-    );
+    ));
 
-    uniqueParticipantIds.forEach((userId) => {
+    (await asyncArray.forEach(uniqueParticipantIds, async (userId) => {
       const isCreator = Number(userId) === Number(createdByUserId);
-      db.prepare(
+      (await db.prepare(
         `
         INSERT INTO chat_conversation_participant (conversation_id, user_id, last_read_at)
         VALUES (?, ?, ?)
       `,
-      ).run(created.lastInsertRowid, userId, isCreator ? now : null);
-    });
+      ).run(created.lastInsertRowid, userId, isCreator ? now : null));
+    }));
 
-    return getChatConversationById(created.lastInsertRowid);
+    return (await getChatConversationById(created.lastInsertRowid));
+  }));
+
   });
 }
 
-function getChatConversationById(id) {
-  const row = getDb()
+async function getChatConversationById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -6136,12 +5974,12 @@ function getChatConversationById(id) {
       WHERE c.id = ?
     `,
     )
-    .get(id);
+    .get(id));
   return mapChatConversation(row);
 }
 
-function listChatConversationParticipants(conversationId) {
-  return getDb()
+async function listChatConversationParticipants(conversationId) {
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -6157,7 +5995,7 @@ function listChatConversationParticipants(conversationId) {
       ORDER BY LOWER(COALESCE(u.name, u.username)), u.id
     `,
     )
-    .all(conversationId)
+    .all(conversationId))
     .map((row) => ({
       id: row.id,
       username: row.username,
@@ -6168,8 +6006,8 @@ function listChatConversationParticipants(conversationId) {
     }));
 }
 
-function isChatConversationParticipant(conversationId, userId) {
-  const row = getDb()
+async function isChatConversationParticipant(conversationId, userId) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT 1
@@ -6179,12 +6017,12 @@ function isChatConversationParticipant(conversationId, userId) {
       LIMIT 1
     `,
     )
-    .get(conversationId, userId);
+    .get(conversationId, userId));
   return Boolean(row);
 }
 
-function listChatConversationsForUser(userId) {
-  return getDb()
+async function listChatConversationsForUser(userId) {
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -6243,12 +6081,12 @@ function listChatConversationsForUser(userId) {
       ORDER BY CAST(COALESCE(lm.sent_at, c.created_at) AS timestamp) DESC, c.id DESC
     `,
     )
-    .all(userId)
+    .all(userId))
     .map(mapChatConversation);
 }
 
-function listChatMessagesForConversation(conversationId) {
-  return getDb()
+async function listChatMessagesForConversation(conversationId) {
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -6267,44 +6105,45 @@ function listChatMessagesForConversation(conversationId) {
       ORDER BY CAST(m.sent_at AS timestamp) ASC, m.id ASC
     `,
     )
-    .all(conversationId)
+    .all(conversationId))
     .map(mapChatMessage);
 }
 
-function createChatMessage({ conversationId, authorUserId, text }) {
+async function createChatMessage({ conversationId, authorUserId, text }) {
+  return withTransaction(async () => {
   const normalizedText = String(text || "").trim();
   if (!normalizedText) {
     throw new Error("A mensagem não pode estar vazia.");
   }
 
-  if (!isChatConversationParticipant(conversationId, authorUserId)) {
+  if (!(await isChatConversationParticipant(conversationId, authorUserId))) {
     throw new Error("Usuário sem permissão para enviar mensagem nesta conversa.");
   }
 
-  const conversation = getChatConversationById(conversationId);
+  const conversation = (await getChatConversationById(conversationId));
   if (conversation?.is_read_only && Number(conversation.created_by_user_id) !== Number(authorUserId)) {
     throw new Error("Esta conversa e somente para recebimento.");
   }
 
-  return withTransaction((db) => {
-    const inserted = db.prepare(
+  return (await withTransaction(async (db) => {
+    const inserted = (await db.prepare(
       `
       INSERT INTO chat_message (conversation_id, author_user_id, text)
       VALUES (?, ?, ?)
       RETURNING id
     `,
-    ).run(conversationId, authorUserId, normalizedText);
+    ).run(conversationId, authorUserId, normalizedText));
 
     const now = toSqlDateTime(new Date());
-    db.prepare(
+    (await db.prepare(
       `
       UPDATE chat_conversation
       SET updated_at = ?
       WHERE id = ?
     `,
-    ).run(now, conversationId);
+    ).run(now, conversationId));
 
-    const row = db.prepare(
+    const row = (await db.prepare(
       `
       SELECT
         m.id,
@@ -6318,20 +6157,23 @@ function createChatMessage({ conversationId, authorUserId, text }) {
       INNER JOIN "user" u ON u.id = m.author_user_id
       WHERE m.id = ?
     `,
-    ).get(inserted.lastInsertRowid);
+    ).get(inserted.lastInsertRowid));
     return mapChatMessage(row);
+  }));
+
   });
 }
 
-function markChatConversationAsRead(conversationId, userId) {
+async function markChatConversationAsRead(conversationId, userId) {
+  return withTransaction(async () => {
   if (!conversationId || !userId) {
     return;
   }
-  if (!isChatConversationParticipant(conversationId, userId)) {
+  if (!(await isChatConversationParticipant(conversationId, userId))) {
     return;
   }
   const now = toSqlDateTime(new Date());
-  getDb()
+  (await getDb()
     .prepare(
       `
       UPDATE chat_conversation_participant
@@ -6340,11 +6182,13 @@ function markChatConversationAsRead(conversationId, userId) {
         AND user_id = ?
     `,
     )
-    .run(now, conversationId, userId);
+    .run(now, conversationId, userId));
+
+  });
 }
 
-function countUnreadChatConversationsForUser(userId) {
-  const row = getDb()
+async function countUnreadChatConversationsForUser(userId) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT COUNT(DISTINCT p.conversation_id) AS total
@@ -6355,12 +6199,12 @@ function countUnreadChatConversationsForUser(userId) {
         AND CAST(m.sent_at AS timestamp) > CAST(COALESCE(p.last_read_at, '1970-01-01 00:00:00') AS timestamp)
     `,
     )
-    .get(userId, userId);
+    .get(userId, userId));
   return Number(row?.total || 0);
 }
 
-function listUnreadChatConversationCountsForUser(userId) {
-  return getDb()
+async function listUnreadChatConversationCountsForUser(userId) {
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -6374,14 +6218,14 @@ function listUnreadChatConversationCountsForUser(userId) {
       GROUP BY p.conversation_id
     `,
     )
-    .all(userId, userId)
+    .all(userId, userId))
     .map((row) => ({
       conversation_id: Number(row.conversation_id),
       unread_count: Number(row.unread_count || 0),
     }));
 }
 
-function registerNotificationEmailDelivery({
+async function registerNotificationEmailDelivery({
   kind,
   recipientUserId,
   referenceKey,
@@ -6393,7 +6237,7 @@ function registerNotificationEmailDelivery({
     return false;
   }
 
-  const row = getDb()
+  const row = (await getDb()
     .prepare(
       `
       INSERT INTO notification_email_delivery (
@@ -6412,12 +6256,12 @@ function registerNotificationEmailDelivery({
       recipientUserId,
       normalizedReference,
       payloadJson ? String(payloadJson) : null,
-    );
+    ));
 
   return Boolean(row?.id);
 }
 
-function listPlannerTasksDueOnDateForEmail(dateKey, { limit = 2000 } = {}) {
+async function listPlannerTasksDueOnDateForEmail(dateKey, { limit = 2000 } = {}) {
   const normalizedDateKey = String(dateKey || "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDateKey)) {
     return [];
@@ -6427,7 +6271,7 @@ function listPlannerTasksDueOnDateForEmail(dateKey, { limit = 2000 } = {}) {
     return [];
   }
 
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -6469,7 +6313,7 @@ function listPlannerTasksDueOnDateForEmail(dateKey, { limit = 2000 } = {}) {
       LIMIT ?
     `,
     )
-    .all(`${normalizedDateKey} 00:00:00`, `${nextDateKey} 00:00:00`, limit)
+    .all(`${normalizedDateKey} 00:00:00`, `${nextDateKey} 00:00:00`, limit))
     .map((row) => ({
       id: Number(row.id),
       project_id: Number(row.project_id),
@@ -6482,8 +6326,8 @@ function listPlannerTasksDueOnDateForEmail(dateKey, { limit = 2000 } = {}) {
     }));
 }
 
-function listUsersForFortnightReportDeadlineReminder() {
-  return getDb()
+async function listUsersForFortnightReportDeadlineReminder() {
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -6503,7 +6347,7 @@ function listUsersForFortnightReportDeadlineReminder() {
       ORDER BY LOWER(COALESCE(NULLIF(TRIM(u.name), ''), u.username)), u.id ASC
     `,
     )
-    .all()
+    .all())
     .map((row) => ({
       id: Number(row.id),
       username: row.username,
@@ -6571,7 +6415,7 @@ function mapAttendee(row) {
   };
 }
 
-function listAttendees({ query = "" } = {}) {
+async function listAttendees({ query = "" } = {}) {
   const search = String(query || "").trim().toLowerCase();
   const params = [];
   let where = "";
@@ -6585,7 +6429,7 @@ function listAttendees({ query = "" } = {}) {
     `;
     params.push(params[0], params[0], params[0]);
   }
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT a.*, COUNT(DISTINCT ea.event_id) AS event_count
@@ -6596,24 +6440,25 @@ function listAttendees({ query = "" } = {}) {
       ORDER BY LOWER(a.name), a.id
     `,
     )
-    .all(...params)
+    .all(...params))
     .map(mapAttendee);
 }
 
-function getAttendeeById(id) {
-  return mapAttendee(getDb().prepare("SELECT * FROM attendee WHERE id = ?").get(id));
+async function getAttendeeById(id) {
+  return mapAttendee((await getDb().prepare("SELECT * FROM attendee WHERE id = ?").get(id)));
 }
 
-function getAttendeeByBadgeCode(badgeCode) {
+async function getAttendeeByBadgeCode(badgeCode) {
   return mapAttendee(
-    getDb()
+    (await getDb()
       .prepare("SELECT * FROM attendee WHERE badge_code = ? LIMIT 1")
-      .get(String(badgeCode || "").trim()),
+      .get(String(badgeCode || "").trim())),
   );
 }
 
-function createAttendee(payload) {
-  const inserted = getDb()
+async function createAttendee(payload) {
+  return withTransaction(async () => {
+  const inserted = (await getDb()
     .prepare(
       `
       INSERT INTO attendee (name, cpf, email, badge_code)
@@ -6621,12 +6466,15 @@ function createAttendee(payload) {
       RETURNING id
     `,
     )
-    .run(payload.name, payload.cpf || null, payload.email || null, payload.badgeCode);
-  return getAttendeeById(inserted.lastInsertRowid);
+    .run(payload.name, payload.cpf || null, payload.email || null, payload.badgeCode));
+  return (await getAttendeeById(inserted.lastInsertRowid));
+
+  });
 }
 
-function updateAttendee(payload) {
-  getDb()
+async function updateAttendee(payload) {
+  return withTransaction(async () => {
+  (await getDb()
     .prepare(
       `
       UPDATE attendee
@@ -6641,8 +6489,8 @@ function updateAttendee(payload) {
       payload.badgeCode,
       toSqlDateTime(new Date()),
       payload.id,
-    );
-  getDb()
+    ));
+  (await getDb()
     .prepare(
       `
       UPDATE event_attendee
@@ -6657,27 +6505,30 @@ function updateAttendee(payload) {
       payload.badgeCode,
       toSqlDateTime(new Date()),
       payload.id,
-    );
-  return getAttendeeById(payload.id);
-}
+    ));
+  return (await getAttendeeById(payload.id));
 
-function deleteAttendee(id) {
-  return withTransaction((db) => {
-    const linked = db.prepare("SELECT COUNT(*) AS total FROM event_attendee WHERE attendee_id = ?").get(id);
-    if (Number(linked?.total || 0) > 0) {
-      throw new Error("Ouvinte vinculado a evento; remova o vínculo no evento antes de excluir.");
-    }
-    return db.prepare("DELETE FROM attendee WHERE id = ?").run(id).changes > 0;
   });
 }
 
-function attachAttendeeToEvent({ eventId, attendeeId }) {
-  const attendee = getAttendeeById(attendeeId);
+async function deleteAttendee(id) {
+  return (await withTransaction(async (db) => {
+    const linked = (await db.prepare("SELECT COUNT(*) AS total FROM event_attendee WHERE attendee_id = ?").get(id));
+    if (Number(linked?.total || 0) > 0) {
+      throw new Error("Ouvinte vinculado a evento; remova o vínculo no evento antes de excluir.");
+    }
+    return (await db.prepare("DELETE FROM attendee WHERE id = ?").run(id)).changes > 0;
+  }));
+}
+
+async function attachAttendeeToEvent({ eventId, attendeeId }) {
+  return withTransaction(async () => {
+  const attendee = (await getAttendeeById(attendeeId));
   if (!attendee) {
     throw new Error("Ouvinte não encontrado.");
   }
-  return withTransaction((db) => {
-    const existing = db
+  return (await withTransaction(async (db) => {
+    const existing = (await db
       .prepare(
         `
         SELECT id
@@ -6687,10 +6538,10 @@ function attachAttendeeToEvent({ eventId, attendeeId }) {
         LIMIT 1
       `,
       )
-      .get(eventId, attendee.id, attendee.badge_code);
+      .get(eventId, attendee.id, attendee.badge_code));
 
     if (existing) {
-      db.prepare(
+      (await db.prepare(
         `
         UPDATE event_attendee
         SET attendee_id = ?, name = ?, cpf = ?, email = ?, badge_code = ?, updated_at = ?
@@ -6704,11 +6555,11 @@ function attachAttendeeToEvent({ eventId, attendeeId }) {
         attendee.badge_code,
         toSqlDateTime(new Date()),
         existing.id,
-      );
-      return getEventAttendeeById(existing.id);
+      ));
+      return (await getEventAttendeeById(existing.id));
     }
 
-    const inserted = db
+    const inserted = (await db
       .prepare(
         `
         INSERT INTO event_attendee (event_id, attendee_id, name, cpf, email, badge_code)
@@ -6716,13 +6567,15 @@ function attachAttendeeToEvent({ eventId, attendeeId }) {
         RETURNING id
       `,
       )
-      .run(eventId, attendee.id, attendee.name, attendee.cpf || null, attendee.email || null, attendee.badge_code);
-    return getEventAttendeeById(inserted.lastInsertRowid);
+      .run(eventId, attendee.id, attendee.name, attendee.cpf || null, attendee.email || null, attendee.badge_code));
+    return (await getEventAttendeeById(inserted.lastInsertRowid));
+  }));
+
   });
 }
 
-function listEvents() {
-  return getDb()
+async function listEvents() {
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -6736,12 +6589,12 @@ function listEvents() {
       ORDER BY e.is_active DESC, COALESCE(e.event_date, e.created_at) DESC, e.id DESC
     `,
     )
-    .all()
+    .all())
     .map(mapEvent);
 }
 
-function getEventById(id) {
-  const row = getDb()
+async function getEventById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -6755,12 +6608,13 @@ function getEventById(id) {
       GROUP BY e.id
     `,
     )
-    .get(id);
+    .get(id));
   return mapEvent(row);
 }
 
-function createEvent({ name, eventDate = null, location = "", description = "" }) {
-  const inserted = getDb()
+async function createEvent({ name, eventDate = null, location = "", description = "" }) {
+  return withTransaction(async () => {
+  const inserted = (await getDb()
     .prepare(
       `
       INSERT INTO event (name, event_date, location, description)
@@ -6768,12 +6622,15 @@ function createEvent({ name, eventDate = null, location = "", description = "" }
       RETURNING id
     `,
     )
-    .run(name, eventDate, location || null, description || "");
-  return getEventById(inserted.lastInsertRowid);
+    .run(name, eventDate, location || null, description || ""));
+  return (await getEventById(inserted.lastInsertRowid));
+
+  });
 }
 
-function updateEvent({ id, name, eventDate = null, location = "", description = "", isActive = true }) {
-  getDb()
+async function updateEvent({ id, name, eventDate = null, location = "", description = "", isActive = true }) {
+  return withTransaction(async () => {
+  (await getDb()
     .prepare(
       `
       UPDATE event
@@ -6781,19 +6638,21 @@ function updateEvent({ id, name, eventDate = null, location = "", description = 
       WHERE id = ?
     `,
     )
-    .run(name, eventDate, location || null, description || "", isActive ? 1 : 0, toSqlDateTime(new Date()), id);
-  return getEventById(id);
-}
+    .run(name, eventDate, location || null, description || "", isActive ? 1 : 0, toSqlDateTime(new Date()), id));
+  return (await getEventById(id));
 
-function deleteEvent(id) {
-  return withTransaction((db) => {
-    db.prepare("DELETE FROM event_attendance WHERE event_id = ?").run(id);
-    db.prepare("DELETE FROM event_attendee WHERE event_id = ?").run(id);
-    return db.prepare("DELETE FROM event WHERE id = ?").run(id).changes > 0;
   });
 }
 
-function listEventAttendees(eventId, { query = "" } = {}) {
+async function deleteEvent(id) {
+  return (await withTransaction(async (db) => {
+    (await db.prepare("DELETE FROM event_attendance WHERE event_id = ?").run(id));
+    (await db.prepare("DELETE FROM event_attendee WHERE event_id = ?").run(id));
+    return (await db.prepare("DELETE FROM event WHERE id = ?").run(id)).changes > 0;
+  }));
+}
+
+async function listEventAttendees(eventId, { query = "" } = {}) {
   const search = String(query || "").trim().toLowerCase();
   const params = [eventId];
   let where = "WHERE ea.event_id = ?";
@@ -6810,7 +6669,7 @@ function listEventAttendees(eventId, { query = "" } = {}) {
     `;
     params.push(params[1], params[1], params[1], params[1]);
   }
-  return getDb()
+  return (await getDb()
     .prepare(
       `
       SELECT
@@ -6825,12 +6684,12 @@ function listEventAttendees(eventId, { query = "" } = {}) {
       ORDER BY LOWER(ea.name), ea.id
     `,
     )
-    .all(...params)
+    .all(...params))
     .map(mapEventAttendee);
 }
 
-function getEventAttendeeById(id) {
-  const row = getDb()
+async function getEventAttendeeById(id) {
+  const row = (await getDb()
     .prepare(
       `
       SELECT
@@ -6844,22 +6703,23 @@ function getEventAttendeeById(id) {
       WHERE ea.id = ?
     `,
     )
-    .get(id);
+    .get(id));
   return mapEventAttendee(row);
 }
 
-function createEventAttendee(payload) {
-  return withTransaction(() => {
-    const existing = getAttendeeByBadgeCode(payload.badgeCode);
+async function createEventAttendee(payload) {
+  return (await withTransaction(async () => {
+    const existing = (await getAttendeeByBadgeCode(payload.badgeCode));
     const attendee = existing
-      ? updateAttendee({ id: existing.id, ...payload })
-      : createAttendee(payload);
-    return attachAttendeeToEvent({ eventId: payload.eventId, attendeeId: attendee.id });
-  });
+      ? (await updateAttendee({ id: existing.id, ...payload }))
+      : (await createAttendee(payload));
+    return (await attachAttendeeToEvent({ eventId: payload.eventId, attendeeId: attendee.id }));
+  }));
 }
 
-function updateEventAttendee(payload) {
-  getDb()
+async function updateEventAttendee(payload) {
+  return withTransaction(async () => {
+  (await getDb()
     .prepare(
       `
       UPDATE event_attendee
@@ -6887,18 +6747,21 @@ function updateEventAttendee(payload) {
       payload.notes || "",
       toSqlDateTime(new Date()),
       payload.id,
-    );
-  return getEventAttendeeById(payload.id);
-}
+    ));
+  return (await getEventAttendeeById(payload.id));
 
-function deleteEventAttendee(id) {
-  return withTransaction((db) => {
-    db.prepare("DELETE FROM event_attendance WHERE attendee_id = ?").run(id);
-    return db.prepare("DELETE FROM event_attendee WHERE id = ?").run(id).changes > 0;
   });
 }
 
-function registerEventAttendance({ eventId, badgeCode, checkedInByUserId, method = "scan" }) {
+async function deleteEventAttendee(id) {
+  return (await withTransaction(async (db) => {
+    (await db.prepare("DELETE FROM event_attendance WHERE attendee_id = ?").run(id));
+    return (await db.prepare("DELETE FROM event_attendee WHERE id = ?").run(id)).changes > 0;
+  }));
+}
+
+async function registerEventAttendance({ eventId, badgeCode, checkedInByUserId, method = "scan" }) {
+  return withTransaction(async () => {
   const normalizedBadge = String(badgeCode || "").trim();
   if (!eventId) {
     return { success: false, message: "Selecione um evento." };
@@ -6906,11 +6769,11 @@ function registerEventAttendance({ eventId, badgeCode, checkedInByUserId, method
   if (!normalizedBadge) {
     return { success: false, message: "Informe o código do crachá." };
   }
-  const event = getEventById(eventId);
+  const event = (await getEventById(eventId));
   if (!event) {
     return { success: false, message: "Evento não encontrado." };
   }
-  let attendee = getDb()
+  let attendee = (await getDb()
     .prepare(
       `
       SELECT ea.*
@@ -6920,15 +6783,15 @@ function registerEventAttendance({ eventId, badgeCode, checkedInByUserId, method
       LIMIT 1
     `,
     )
-    .get(eventId, normalizedBadge);
+    .get(eventId, normalizedBadge));
   if (!attendee) {
-    const generalAttendee = getAttendeeByBadgeCode(normalizedBadge);
+    const generalAttendee = (await getAttendeeByBadgeCode(normalizedBadge));
     if (!generalAttendee) {
       return { success: false, message: "Crachá não encontrado na lista de ouvintes." };
     }
-    attendee = attachAttendeeToEvent({ eventId, attendeeId: generalAttendee.id });
+    attendee = (await attachAttendeeToEvent({ eventId, attendeeId: generalAttendee.id }));
   }
-  const current = getDb()
+  const current = (await getDb()
     .prepare(
       `
       SELECT checked_in_at
@@ -6937,7 +6800,7 @@ function registerEventAttendance({ eventId, badgeCode, checkedInByUserId, method
       LIMIT 1
     `,
     )
-    .get(eventId, attendee.id);
+    .get(eventId, attendee.id));
   if (current?.checked_in_at) {
     return {
       success: false,
@@ -6946,23 +6809,25 @@ function registerEventAttendance({ eventId, badgeCode, checkedInByUserId, method
     };
   }
   const checkedInAt = toSqlDateTime(new Date());
-  getDb()
+  (await getDb()
     .prepare(
       `
       INSERT INTO event_attendance (event_id, attendee_id, checked_in_at, checked_in_by_user_id, method)
       VALUES (?, ?, ?, ?, ?)
     `,
     )
-    .run(eventId, attendee.id, checkedInAt, checkedInByUserId || null, method);
+    .run(eventId, attendee.id, checkedInAt, checkedInByUserId || null, method));
   return {
     success: true,
     message: `${attendee.name} registrado(a) em ${event.name}.`,
     attendee: mapEventAttendee({ ...attendee, checked_in_at: checkedInAt }),
   };
+
+  });
 }
 
-function listPresenceMatrixEvents() {
-  return getDb()
+async function listPresenceMatrixEvents() {
+  return (await getDb()
     .prepare(
       `
       SELECT *
@@ -6970,12 +6835,12 @@ function listPresenceMatrixEvents() {
       ORDER BY COALESCE(event_date, created_at), id
     `,
     )
-    .all()
+    .all())
     .map(mapEvent);
 }
 
-function listPresenceMatrixRows() {
-  const rows = getDb()
+async function listPresenceMatrixRows() {
+  const rows = (await getDb()
     .prepare(
       `
       SELECT
@@ -6993,7 +6858,7 @@ function listPresenceMatrixRows() {
       ORDER BY LOWER(a.name), a.id, ea.event_id
     `,
     )
-    .all();
+    .all());
   const byId = new Map();
   rows.forEach((row) => {
     if (!byId.has(row.id)) {
@@ -7165,3 +7030,21 @@ module.exports = {
   isProjectCoordinator,
   withdrawInventoryItem,
 };
+
+function createPreparedStatement(sql) {
+  const converted = toPostgresSql(sql);
+  return {
+    async run(...params) {
+      const result = await postgres.query(converted, params);
+      return { changes: Number(result.rowCount || 0), lastInsertRowid: result.rows?.[0]?.id == null ? null : Number(result.rows[0].id) };
+    },
+    async get(...params) { return (await postgres.query(converted, params)).rows[0]; },
+    async all(...params) { return (await postgres.query(converted, params)).rows; },
+  };
+}
+function createDbAdapter() {
+  return { prepare: createPreparedStatement, exec: async (sql) => (await postgres.query(toPostgresSql(sql))) };
+}
+async function withTransaction(callback) {
+  return (await postgres.withTransaction(() => callback(getDb())));
+}

@@ -54,7 +54,7 @@ function nextDayParts(now, timeZone) {
 }
 
 function isFortnightDeadlineDay(parts) {
-  return parts.day === 2 || parts.day === 17;
+  return parts.day === 1 || parts.day === 16;
 }
 
 function formatUserLabel(user) {
@@ -86,8 +86,8 @@ function createNotificationService({ database, config, logger = console }) {
       return { sent: 0, skipped: "email_disabled" };
     }
 
-    const author = database.getUserById(authorUserId);
-    const participants = database.listChatConversationParticipants(conversationId) || [];
+    const author = (await database.getUserById(authorUserId));
+    const participants = (await database.listChatConversationParticipants(conversationId)) || [];
     let sent = 0;
 
     for (const participant of participants) {
@@ -95,7 +95,7 @@ function createNotificationService({ database, config, logger = console }) {
         continue;
       }
 
-      const targetUser = database.getUserById(participant.id);
+      const targetUser = (await database.getUserById(participant.id));
       const email = emailService.normalizeEmail(targetUser?.email);
       if (!email) {
         logger.info?.(
@@ -142,7 +142,7 @@ function createNotificationService({ database, config, logger = console }) {
     const tomorrowDateKey = toDateKey(tomorrow);
     let sent = 0;
 
-    const dueTasks = database.listPlannerTasksDueOnDateForEmail(tomorrowDateKey, { limit: 2000 });
+    const dueTasks = (await database.listPlannerTasksDueOnDateForEmail(tomorrowDateKey, { limit: 2000 }));
     for (const task of dueTasks) {
       const recipientEmail = emailService.normalizeEmail(task?.recipient_email);
       if (!recipientEmail || !task?.recipient_user_id) {
@@ -150,7 +150,7 @@ function createNotificationService({ database, config, logger = console }) {
       }
 
       const referenceKey = `planner_task_due_1d:${task.id}:${tomorrowDateKey}`;
-      const canSend = database.registerNotificationEmailDelivery({
+      const canSend = (await database.registerNotificationEmailDelivery({
         kind: "planner_task_due_1d",
         recipientUserId: task.recipient_user_id,
         referenceKey,
@@ -159,7 +159,7 @@ function createNotificationService({ database, config, logger = console }) {
           due_at: task.due_at,
           project_id: task.project_id,
         }),
-      });
+      }));
       if (!canSend) {
         continue;
       }
@@ -187,7 +187,7 @@ function createNotificationService({ database, config, logger = console }) {
     }
 
     if (isFortnightDeadlineDay(tomorrow)) {
-      const recipients = database.listUsersForFortnightReportDeadlineReminder();
+      const recipients = (await database.listUsersForFortnightReportDeadlineReminder());
       for (const user of recipients) {
         const email = emailService.normalizeEmail(user?.email);
         if (!email || !user?.id) {
@@ -195,14 +195,14 @@ function createNotificationService({ database, config, logger = console }) {
         }
 
         const referenceKey = `report_fortnight_due_1d:${tomorrowDateKey}`;
-        const canSend = database.registerNotificationEmailDelivery({
+        const canSend = (await database.registerNotificationEmailDelivery({
           kind: "report_fortnight_due_1d",
           recipientUserId: user.id,
           referenceKey,
           payloadJson: JSON.stringify({
             deadline_date: tomorrowDateKey,
           }),
-        });
+        }));
         if (!canSend) {
           continue;
         }
@@ -234,7 +234,7 @@ function createNotificationService({ database, config, logger = console }) {
   let intervalHandle = null;
   let running = false;
 
-  function startDeadlineScheduler({
+  async function startDeadlineScheduler({
     intervalMs = 5 * 60 * 1000,
     runOnStart = true,
   } = {}) {
@@ -264,7 +264,7 @@ function createNotificationService({ database, config, logger = console }) {
     };
 
     if (runOnStart) {
-      runSweepSafely();
+      (await runSweepSafely());
     }
     intervalHandle = setInterval(runSweepSafely, Math.max(30_000, Number(intervalMs || 0)));
     if (typeof intervalHandle.unref === "function") {

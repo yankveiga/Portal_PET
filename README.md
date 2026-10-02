@@ -109,7 +109,7 @@ npm run verify
 npm run notify:run-once
 ```
 
-`npm run verify` carrega a aplicação e valida fluxos principais. Use preferencialmente uma base de teste.
+`npm run verify` cria um schema PostgreSQL temporario, valida os fluxos e remove o schema ao terminar. A conexao precisa de permissao para criar schemas. `npm test` inclui tambem os testes isolados de advertencias. Em Neon, a verificacao usa o endpoint direto do mesmo banco para isolar o `search_path`.
 
 ## Rotas importantes
 
@@ -144,7 +144,9 @@ npm run notify:run-once
 
 ## Performance
 
-- `src/database.js` expõe API síncrona para as rotas, mas executa SQL em worker interno.
+- Todas as operacoes de banco em `src/database.js` sao assincronas e usam o pool de `src/postgres.js`. As rotas e scripts devem usar `await`.
+- `PG_POOL_MAX` limita as conexoes por processo (padrao: 6); `DB_SLOW_QUERY_MS` ativa o log de duracao sem expor parametros.
+- Transacoes reutilizam a mesma conexao nos helpers. As escritas compostas usam exclusao mutua transacional para preservar estoque e auditoria durante acessos concorrentes.
 - Evite adicionar consultas em middleware global.
 - Evite consultas dentro de loops quando uma query com join resolver.
 - Telas grandes devem carregar apenas o necessário para a aba/visão atual.

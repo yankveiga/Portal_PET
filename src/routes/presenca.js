@@ -1,3 +1,4 @@
+const asyncArray = require("../asyncArray");
 ﻿const fs = require("node:fs");
 const multer = require("multer");
 const ExcelJS = require("exceljs");
@@ -162,10 +163,10 @@ function buildEventQuery(eventId, extra = {}) {
 }
 
 // Resolve qual evento deve aparecer selecionado ao abrir telas de presenca.
-function resolveSelectedEvent(database, requestedEventId) {
-  const events = database.listEvents();
+async function resolveSelectedEvent(database, requestedEventId) {
+  const events = (await database.listEvents());
   const selectedEvent = requestedEventId
-    ? database.getEventById(requestedEventId)
+    ? (await database.getEventById(requestedEventId))
     : (events.find((event) => event.is_active) || events[0] || null);
   return { events, selectedEvent };
 }
@@ -271,12 +272,12 @@ function registerPresenceRoutes(ctx) {
   });
 
   // Renderiza a tela de atividades cadastradas.
-  function renderEvents(req, res, data = {}) {
+  async function renderEvents(req, res, data = {}) {
     return render(res, "presenca/eventos.html", {
       title: "Eventos",
       activeSection: "presenca",
       activePresenceTab: "eventos",
-      events: database.listEvents(),
+      events: (await database.listEvents()),
       eventFormData: data.eventFormData || {
         name: "",
         event_date: "",
@@ -287,11 +288,11 @@ function registerPresenceRoutes(ctx) {
   }
 
   // Renderiza a tela de ouvintes, mantendo evento selecionado e busca.
-  function renderAttendees(req, res, data = {}) {
+  async function renderAttendees(req, res, data = {}) {
     const selectedEventId = parseId(data.eventId || req.query.event_id);
-    const { events, selectedEvent } = resolveSelectedEvent(database, selectedEventId);
+    const { events, selectedEvent } = (await resolveSelectedEvent(database, selectedEventId));
     const query = String(data.searchQuery ?? req.query.q ?? "");
-    const attendees = database.listAttendees({ query });
+    const attendees = (await database.listAttendees({ query }));
     return render(res, "presenca/ouvintes.html", {
       title: "Ouvintes",
       activeSection: "presenca",
@@ -313,9 +314,9 @@ function registerPresenceRoutes(ctx) {
   }
 
   // Renderiza a tela de check-in por cracha/codigo.
-  function renderCheckin(req, res) {
+  async function renderCheckin(req, res) {
     const selectedEventId = parseId(req.query.event_id);
-    const { events, selectedEvent } = resolveSelectedEvent(database, selectedEventId);
+    const { events, selectedEvent } = (await resolveSelectedEvent(database, selectedEventId));
     return render(res, "presenca/checkin.html", {
       title: "Check-in",
       activeSection: "presenca",
@@ -397,27 +398,27 @@ function registerPresenceRoutes(ctx) {
   );
 
   // Cria uma nova atividade de presenca.
-  app.post("/presenca/eventos/criar", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/presenca/eventos/criar", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
     const formData = normalizeEventForm(req.body);
     const errors = validateEventForm(formData);
     if (Object.keys(errors).length) {
-      return renderEvents(req, res, { eventFormData: req.body, eventErrors: errors });
+      return (await renderEvents(req, res, { eventFormData: req.body, eventErrors: errors }));
     }
-    const event = database.createEvent(formData);
+    const event = (await database.createEvent(formData));
     req.flash("success", "Evento criado com sucesso.");
     return res.redirect(`${urlFor("presenca_eventos")}#event-${event.id}`);
   });
 
   // Edita nome, data e status ativo/inativo de uma atividade.
-  app.post("/presenca/eventos/:id/editar", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/presenca/eventos/:id/editar", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
     const eventId = parseId(req.params.id);
-    if (!database.getEventById(eventId)) {
+    if (!(await database.getEventById(eventId))) {
       req.flash("danger", "Evento não encontrado.");
       return res.redirect(urlFor("presenca_eventos"));
     }
@@ -427,23 +428,23 @@ function registerPresenceRoutes(ctx) {
       req.flash("danger", "Nome do evento é obrigatório.");
       return res.redirect(urlFor("presenca_eventos"));
     }
-    database.updateEvent({ id: eventId, ...formData });
+    (await database.updateEvent({ id: eventId, ...formData }));
     req.flash("success", "Evento atualizado.");
     return res.redirect(`${urlFor("presenca_eventos")}#event-${eventId}`);
   });
 
   // Remove uma atividade e seus vinculos de presenca.
-  app.post("/presenca/eventos/:id/excluir", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/presenca/eventos/:id/excluir", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
-    database.deleteEvent(parseId(req.params.id));
+    (await database.deleteEvent(parseId(req.params.id)));
     req.flash("success", "Evento excluído.");
     return res.redirect(urlFor("presenca_eventos"));
   });
 
   // Cria um ouvinte e, se houver evento selecionado, ja vincula os dois.
-  app.post("/presenca/ouvintes/criar", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/presenca/ouvintes/criar", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
@@ -451,16 +452,16 @@ function registerPresenceRoutes(ctx) {
     const formData = normalizeAttendeeForm(req.body);
     const errors = validateAttendeeForm(formData);
     if (Object.keys(errors).length) {
-      return renderAttendees(req, res, {
+      return (await renderAttendees(req, res, {
         eventId,
         attendeeFormData: req.body,
         attendeeErrors: errors,
-      });
+      }));
     }
     try {
-      const attendee = database.createAttendee(formData);
+      const attendee = (await database.createAttendee(formData));
       if (eventId) {
-        database.attachAttendeeToEvent({ eventId, attendeeId: attendee.id });
+        (await database.attachAttendeeToEvent({ eventId, attendeeId: attendee.id }));
       }
       req.flash("success", eventId ? "Ouvinte cadastrado e vinculado ao evento." : "Ouvinte cadastrado.");
     } catch (error) {
@@ -470,11 +471,11 @@ function registerPresenceRoutes(ctx) {
   });
 
   // Edita os dados cadastrais de um ouvinte.
-  app.post("/presenca/ouvintes/:id/editar", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/presenca/ouvintes/:id/editar", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
-    const attendee = database.getAttendeeById(parseId(req.params.id));
+    const attendee = (await database.getAttendeeById(parseId(req.params.id)));
     if (!attendee) {
       req.flash("danger", "Ouvinte não encontrado.");
       return res.redirect(urlFor("presenca_ouvintes"));
@@ -486,7 +487,7 @@ function registerPresenceRoutes(ctx) {
       return res.redirect(urlFor("presenca_ouvintes"));
     }
     try {
-      database.updateAttendee({ id: attendee.id, ...formData });
+      (await database.updateAttendee({ id: attendee.id, ...formData }));
       req.flash("success", "Ouvinte atualizado.");
     } catch (error) {
       req.flash("danger", `Erro ao atualizar ouvinte: ${error.message}`);
@@ -495,17 +496,17 @@ function registerPresenceRoutes(ctx) {
   });
 
   // Exclui um ouvinte cadastrado.
-  app.post("/presenca/ouvintes/:id/excluir", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/presenca/ouvintes/:id/excluir", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
-    const attendee = database.getAttendeeById(parseId(req.params.id));
+    const attendee = (await database.getAttendeeById(parseId(req.params.id)));
     if (!attendee) {
       req.flash("danger", "Ouvinte não encontrado.");
       return res.redirect(urlFor("presenca_ouvintes"));
     }
     try {
-      database.deleteAttendee(attendee.id);
+      (await database.deleteAttendee(attendee.id));
       req.flash("success", "Ouvinte excluído.");
     } catch (error) {
       req.flash("danger", error.message);
@@ -514,18 +515,18 @@ function registerPresenceRoutes(ctx) {
   });
 
   // Vincula um ouvinte existente a uma atividade.
-  app.post("/presenca/ouvintes/:id/vincular", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/presenca/ouvintes/:id/vincular", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
     const attendeeId = parseId(req.params.id);
     const eventId = parseId(req.body.event_id);
-    if (!database.getEventById(eventId)) {
+    if (!(await database.getEventById(eventId))) {
       req.flash("danger", "Selecione um evento válido.");
       return res.redirect(urlFor("presenca_ouvintes"));
     }
     try {
-      database.attachAttendeeToEvent({ eventId, attendeeId });
+      (await database.attachAttendeeToEvent({ eventId, attendeeId }));
       req.flash("success", "Ouvinte vinculado ao evento.");
     } catch (error) {
       req.flash("danger", error.message);
@@ -539,12 +540,12 @@ function registerPresenceRoutes(ctx) {
     requireAuth,
     requireAdminPage,
     csvUpload.single("csv_file"),
-    (req, res) => {
+    async (req, res) => {
       if (!ensureValidCsrf(req, res)) {
         return;
       }
       const eventId = parseId(req.body.event_id);
-      const event = eventId ? database.getEventById(eventId) : null;
+      const event = eventId ? (await database.getEventById(eventId)) : null;
       if (req.uploadError) {
         req.flash("danger", req.uploadError);
         return res.redirect(`${urlFor("presenca_ouvintes")}${buildEventQuery(event?.id)}`);
@@ -565,7 +566,7 @@ function registerPresenceRoutes(ctx) {
       }
       const previewRows = mapCsvRows({
         rows,
-        existingAttendees: database.listAttendees(),
+        existingAttendees: (await database.listAttendees()),
       });
       const summary = previewRows.reduce(
         (acc, row) => {
@@ -575,24 +576,24 @@ function registerPresenceRoutes(ctx) {
         },
         { total: 0, new: 0, duplicate: 0, error: 0 },
       );
-      return renderAttendees(req, res, {
+      return (await renderAttendees(req, res, {
         eventId: event?.id || null,
         importPreview: {
           rows: previewRows,
           payloadJson: JSON.stringify(previewRows.filter((row) => row.status !== "error")),
           summary,
         },
-      });
+      }));
     },
   );
 
   // Confirma a importacao CSV, criando novos ouvintes ou atualizando duplicados.
-  app.post("/presenca/ouvintes/importar/confirmar", requireAuth, requireAdminPage, (req, res) => {
+  app.post("/presenca/ouvintes/importar/confirmar", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
     }
     const eventId = parseId(req.body.event_id);
-    const event = eventId ? database.getEventById(eventId) : null;
+    const event = eventId ? (await database.getEventById(eventId)) : null;
     let rows = [];
     try {
       rows = JSON.parse(String(req.body.import_payload_json || "[]"));
@@ -601,7 +602,7 @@ function registerPresenceRoutes(ctx) {
     }
     const duplicateMode = String(req.body.duplicate_mode || "") === "update" ? "update" : "ignore";
     const summary = { total: rows.length, imported: 0, updated: 0, skipped: 0, errors: 0 };
-    rows.forEach((row) => {
+    (await asyncArray.forEach(rows, async (row) => {
       const attendee = row.attendee || {};
       if (!attendee.name || !attendee.badgeCode) {
         summary.errors += 1;
@@ -610,47 +611,47 @@ function registerPresenceRoutes(ctx) {
       try {
         if (row.existingId) {
           if (duplicateMode === "update") {
-            database.updateAttendee({ id: row.existingId, ...attendee });
+            (await database.updateAttendee({ id: row.existingId, ...attendee }));
             if (event) {
-              database.attachAttendeeToEvent({ eventId: event.id, attendeeId: row.existingId });
+              (await database.attachAttendeeToEvent({ eventId: event.id, attendeeId: row.existingId }));
             }
             summary.updated += 1;
           } else {
             if (event) {
-              database.attachAttendeeToEvent({ eventId: event.id, attendeeId: row.existingId });
+              (await database.attachAttendeeToEvent({ eventId: event.id, attendeeId: row.existingId }));
             }
             summary.skipped += 1;
           }
           return;
         }
-        const created = database.createAttendee(attendee);
+        const created = (await database.createAttendee(attendee));
         if (event) {
-          database.attachAttendeeToEvent({ eventId: event.id, attendeeId: created.id });
+          (await database.attachAttendeeToEvent({ eventId: event.id, attendeeId: created.id }));
         }
         summary.imported += 1;
       } catch (_error) {
         summary.errors += 1;
       }
-    });
-    return renderAttendees(req, res, {
+    }));
+    return (await renderAttendees(req, res, {
       eventId: event?.id || null,
       importSummary: summary,
-    });
+    }));
   });
 
   // Endpoint usado pelo check-in para registrar presenca via cracha.
-  app.post("/presenca/registrar", requireAuth, (req, res) => {
+  app.post("/presenca/registrar", requireAuth, async (req, res) => {
     if (!verifyCsrf(req)) {
       const nextToken = ensureCsrfToken(req);
       return sendApiError(req, res, 403, "CSRF token inválido ou expirado.", { csrfToken: nextToken });
     }
     try {
-      const result = database.registerEventAttendance({
+      const result = (await database.registerEventAttendance({
         eventId: parseId(req.body.event_id || req.body.evento),
         badgeCode: req.body.badge_code || req.body.cracha,
         checkedInByUserId: req.currentUser?.id || null,
         method: "scan",
-      });
+      }));
       return res.status(result.success ? 200 : 422).json(result);
     } catch (error) {
       logError(req, "Erro ao registrar presença:", error);
@@ -659,13 +660,13 @@ function registerPresenceRoutes(ctx) {
   });
 
   // Exporta a lista de presenca de uma atividade especifica em CSV.
-  app.get("/presenca/eventos/:id/exportar.csv", requireAuth, (req, res) => {
-    const event = database.getEventById(parseId(req.params.id));
+  app.get("/presenca/eventos/:id/exportar.csv", requireAuth, async (req, res) => {
+    const event = (await database.getEventById(parseId(req.params.id)));
     if (!event) {
       req.flash("danger", "Evento não encontrado.");
       return res.redirect(urlFor("presenca_ouvintes"));
     }
-    const attendees = database.listEventAttendees(event.id);
+    const attendees = (await database.listEventAttendees(event.id));
     const header = ["CRACHA", "NOME", "CPF", "EMAIL", "PRESENTE", "REGISTRADO_EM"];
     const lines = [header.join(",")];
     attendees.forEach((attendee) => {
@@ -686,8 +687,8 @@ function registerPresenceRoutes(ctx) {
   // Exporta a matriz geral de presenca em XLSX, com uma coluna por atividade.
   app.get("/presenca/exportar-geral.xlsx", requireAuth, async (req, res) => {
     try {
-      const events = database.listPresenceMatrixEvents();
-      const rows = database.listPresenceMatrixRows();
+      const events = (await database.listPresenceMatrixEvents());
+      const rows = (await database.listPresenceMatrixRows());
       const workbook = await buildPresenceWorkbook({ events, rows });
       const buffer = await workbook.xlsx.writeBuffer();
       res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");

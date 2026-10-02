@@ -1,3 +1,4 @@
+const asyncArray = require("../src/asyncArray");
 /*
  * ARQUIVO: scripts/verify-app.js
  * FUNCAO: script de verificacao automatizada para validar fluxos principais do sistema em banco Postgres configurado.
@@ -14,14 +15,14 @@ const bcrypt = require("bcryptjs");
 
 const { urlFor } = require("../src/utils");
 
-function cleanupVerifyArtifacts(database, artifacts) {
+async function cleanupVerifyArtifacts(database, artifacts) {
   if (!database || !artifacts) {
     return;
   }
 
   try {
     if (artifacts.createdAtaId) {
-      database.deleteAta(artifacts.createdAtaId);
+      (await database.deleteAta(artifacts.createdAtaId));
     }
   } catch (error) {
     console.error("Falha ao limpar ata de verificacao:", error.message);
@@ -32,19 +33,19 @@ function cleanupVerifyArtifacts(database, artifacts) {
     ? artifacts.createdInventoryItemIds.filter((id) => Number.isFinite(Number(id)))
     : [];
 
-  createdItemIds.forEach((itemId) => {
+  (await asyncArray.forEach(createdItemIds, async (itemId) => {
     try {
-      db.prepare("DELETE FROM inventory_loan WHERE item_id = ?").run(itemId);
-      db.prepare("DELETE FROM pedido WHERE estoque_id = ?").run(itemId);
-      db.prepare("DELETE FROM estoque WHERE id = ?").run(itemId);
+      (await db.prepare("DELETE FROM inventory_loan WHERE item_id = ?").run(itemId));
+      (await db.prepare("DELETE FROM pedido WHERE estoque_id = ?").run(itemId));
+      (await db.prepare("DELETE FROM estoque WHERE id = ?").run(itemId));
     } catch (error) {
       console.error(`Falha ao limpar item de verificacao ${itemId}:`, error.message);
     }
-  });
+  }));
 
   if (artifacts.createdCategoryId) {
     try {
-      db.prepare("DELETE FROM inventory_category WHERE id = ?").run(artifacts.createdCategoryId);
+      (await db.prepare("DELETE FROM inventory_category WHERE id = ?").run(artifacts.createdCategoryId));
     } catch (error) {
       console.error("Falha ao limpar categoria de verificacao:", error.message);
     }
@@ -52,46 +53,49 @@ function cleanupVerifyArtifacts(database, artifacts) {
 
   if (artifacts.createdLocationId) {
     try {
-      db.prepare("DELETE FROM inventory_location WHERE id = ?").run(artifacts.createdLocationId);
+      (await db.prepare("DELETE FROM inventory_location WHERE id = ?").run(artifacts.createdLocationId));
     } catch (error) {
       console.error("Falha ao limpar local de verificacao:", error.message);
     }
   }
 
   const usernames = Array.isArray(artifacts.verifyUsernames) ? artifacts.verifyUsernames : [];
-  usernames.forEach((username) => {
-    const user = database.getUserByUsername(username);
+  (await asyncArray.forEach(usernames, async (username) => {
+    const user = (await database.getUserByUsername(username));
     if (!user?.id) {
       return;
     }
 
     const userId = user.id;
     try {
-      db.prepare("DELETE FROM notification_email_delivery WHERE recipient_user_id = ?").run(userId);
-      db.prepare("DELETE FROM chat_message WHERE author_user_id = ?").run(userId);
-      db.prepare("DELETE FROM chat_conversation_participant WHERE user_id = ?").run(userId);
-      db.prepare("DELETE FROM chat_conversation WHERE created_by_user_id = ?").run(userId);
-      db.prepare("DELETE FROM writing_general_entry WHERE author_user_id = ?").run(userId);
-      db.prepare("DELETE FROM writing_tutor_private_entry WHERE tutor_user_id = ?").run(userId);
-      db.prepare("DELETE FROM report_fortnight_member_note WHERE author_user_id = ? OR target_tutor_user_id = ?").run(userId, userId);
-      db.prepare("DELETE FROM report_fortnight_tutor_note WHERE tutor_user_id = ?").run(userId);
-      db.prepare("DELETE FROM report_week_goal_deletion_log WHERE deleted_by_user_id = ?").run(userId);
-      db.prepare("DELETE FROM planner_task_completion_log WHERE completed_by_user_id = ?").run(userId);
-      db.prepare("DELETE FROM planner_task WHERE created_by_user_id = ? OR last_extended_by_user_id = ?").run(userId, userId);
-      db.prepare("DELETE FROM report_week_goal WHERE created_by_user_id = ?").run(userId);
-      db.prepare("DELETE FROM report_entry WHERE created_by_user_id = ?").run(userId);
-      db.prepare("DELETE FROM inventory_loan WHERE user_id = ? OR extended_by_user_id = ? OR returned_by_user_id = ?").run(userId, userId, userId);
-      db.prepare("DELETE FROM pedido WHERE usuario_id = ?").run(userId);
-      db.prepare('DELETE FROM "user" WHERE id = ?').run(userId);
+      (await db.prepare("DELETE FROM notification_email_delivery WHERE recipient_user_id = ?").run(userId));
+      (await db.prepare("DELETE FROM chat_message WHERE author_user_id = ?").run(userId));
+      (await db.prepare("DELETE FROM chat_conversation_participant WHERE user_id = ?").run(userId));
+      (await db.prepare("DELETE FROM chat_conversation WHERE created_by_user_id = ?").run(userId));
+      (await db.prepare("DELETE FROM writing_general_entry WHERE author_user_id = ?").run(userId));
+      (await db.prepare("DELETE FROM writing_tutor_private_entry WHERE tutor_user_id = ?").run(userId));
+      (await db.prepare("DELETE FROM report_fortnight_member_note WHERE author_user_id = ? OR target_tutor_user_id = ?").run(userId, userId));
+      (await db.prepare("DELETE FROM report_fortnight_tutor_note WHERE tutor_user_id = ?").run(userId));
+      (await db.prepare("DELETE FROM report_week_goal_deletion_log WHERE deleted_by_user_id = ?").run(userId));
+      (await db.prepare("DELETE FROM planner_task_completion_log WHERE completed_by_user_id = ?").run(userId));
+      (await db.prepare("DELETE FROM planner_task WHERE created_by_user_id = ? OR last_extended_by_user_id = ?").run(userId, userId));
+      (await db.prepare("DELETE FROM report_week_goal WHERE created_by_user_id = ?").run(userId));
+      (await db.prepare("DELETE FROM report_entry WHERE created_by_user_id = ?").run(userId));
+      (await db.prepare("DELETE FROM inventory_loan WHERE user_id = ? OR extended_by_user_id = ? OR returned_by_user_id = ?").run(userId, userId, userId));
+      (await db.prepare("DELETE FROM pedido WHERE usuario_id = ?").run(userId));
+      (await db.prepare('DELETE FROM "user" WHERE id = ?').run(userId));
     } catch (error) {
       console.error(`Falha ao limpar usuario de verificacao @${username}:`, error.message);
     }
-  });
+  }));
 }
 
 // SECAO: rotina de verificacao ponta a ponta usando a base Postgres configurada.
 
 async function main() {
+  if (!/^verify_async_[a-f0-9]{16}$/.test(process.env.PORTAL_TEST_SCHEMA || "")) {
+    throw new Error("Execute npm run verify para usar um schema isolado.");
+  }
   if (!process.env.DATABASE_URL) {
     throw new Error("Defina DATABASE_URL para executar a verificação no Postgres.");
   }
@@ -107,49 +111,51 @@ async function main() {
     createdLocationId: null,
   };
 
-  database.ensureSchema();
+  const schema = await require("../src/postgres").query("SELECT current_schema() AS name");
+  assert.equal(schema.rows[0].name, process.env.PORTAL_TEST_SCHEMA);
+  (await database.ensureSchema());
   try {
 
     const adminUsername = "codex_verify_admin";
     const adminPassword = "codex123";
-    let adminUser = database.getUserByUsername(adminUsername);
+    let adminUser = (await database.getUserByUsername(adminUsername));
     if (!adminUser) {
-      adminUser = database.createUser(
+      adminUser = (await database.createUser(
         adminUsername,
         bcrypt.hashSync(adminPassword, 12),
         {
           name: "Codex Verify Admin",
           role: "admin",
         },
-      );
+      ));
     }
 
     const commonUsername = "codex_verify_common";
-    let commonUser = database.getUserByUsername(commonUsername);
+    let commonUser = (await database.getUserByUsername(commonUsername));
     if (!commonUser) {
-      commonUser = database.createUser(
+      commonUser = (await database.createUser(
         commonUsername,
         bcrypt.hashSync("codex456", 12),
         {
           name: "Codex Verify Common",
           role: "common",
         },
-      );
+      ));
     }
     const tutorUsername = "codex_verify_tutor";
-    let tutorUser = database.getUserByUsername(tutorUsername);
+    let tutorUser = (await database.getUserByUsername(tutorUsername));
     if (!tutorUser) {
-      tutorUser = database.createUser(
+      tutorUser = (await database.createUser(
         tutorUsername,
         bcrypt.hashSync("codex789", 12),
         {
           name: "Codex Verify Tutor",
           role: "tutor",
         },
-      );
+      ));
     }
 
-    const app = createApp();
+    const app = (await createApp());
     const render = promisify(app.render.bind(app));
 
     const routeEntries = app._router.stack
@@ -217,16 +223,16 @@ async function main() {
     assert.equal(tutorUser.is_admin, true);
 
     const csrfToken = "csrf-token-teste";
-    const projects = database.listProjectsBasic();
+    const projects = (await database.listProjectsBasic());
     assert.ok(projects.length > 0, "Nenhum projeto encontrado no banco de teste.");
-    const project = database.getProjectById(projects[0].id);
+    const project = (await database.getProjectById(projects[0].id));
     assert.ok(project, "Projeto de teste não encontrado.");
     assert.ok(
       project.active_members.length > 0,
       "Projeto de teste não possui membros ativos.",
     );
 
-    const recentAtasBefore = database.listRecentAtas(5);
+    const recentAtasBefore = (await database.listRecentAtas(5));
     assert.ok(recentAtasBefore.length > 0, "Nenhuma ata encontrada para teste.");
 
     await render("login.html", {
@@ -260,7 +266,7 @@ async function main() {
       currentUser: commonUser,
       flashMessages: [],
       csrfToken,
-      members: database.listActiveMembers(),
+      members: (await database.listActiveMembers()),
     });
 
     await render("projects/list.html", {
@@ -269,7 +275,7 @@ async function main() {
       currentUser: commonUser,
       flashMessages: [],
       csrfToken,
-      projects: database.listProjectsWithMembers(),
+      projects: (await database.listProjectsWithMembers()),
     });
 
     await render("atas/create_form.html", {
@@ -295,86 +301,86 @@ async function main() {
 
     const categoryName = `Categoria Verificacao ${Date.now()}`;
     const locationName = `Local Verificacao ${Date.now()}`;
-    const category = database.createInventoryCategory(categoryName);
-    const location = database.createInventoryLocation(locationName);
+    const category = (await database.createInventoryCategory(categoryName));
+    const location = (await database.createInventoryLocation(locationName));
     artifacts.createdCategoryId = category?.id || null;
     artifacts.createdLocationId = location?.id || null;
     assert.ok(category?.id, "Falha ao criar categoria de patrimônio.");
     assert.ok(location?.id, "Falha ao criar local de patrimônio.");
 
     const inventoryName = `Estoque Verificacao ${Date.now()}`;
-    const createdItem = database.createInventoryItem({
+    const createdItem = (await database.createInventoryItem({
       name: inventoryName,
       itemType: "stock",
       categoryId: category.id,
       locationId: location.id,
       quantity: 7,
       description: "Produto criado durante a verificação automatizada.",
-    });
+    }));
     assert.ok(createdItem?.id, "Falha ao criar item de estoque para teste.");
     artifacts.createdInventoryItemIds.push(createdItem?.id || null);
     assert.equal(createdItem.item_type, "stock");
     assert.equal(createdItem.category, category.name);
     assert.equal(createdItem.location, location.name);
 
-    const withdrawal = database.withdrawInventoryItem({
+    const withdrawal = (await database.withdrawInventoryItem({
       nameOrCode: String(createdItem.id),
       quantity: 2,
       userId: adminUser.id,
-    });
+    }));
     assert.equal(withdrawal.success, true, "Falha ao registrar retirada de estoque.");
 
     const patrimonyName = `Patrimonio Verificacao ${Date.now()}`;
-    const patrimonyItem = database.createInventoryItem({
+    const patrimonyItem = (await database.createInventoryItem({
       name: patrimonyName,
       itemType: "patrimony",
       categoryId: category.id,
       locationId: location.id,
       quantity: 3,
       description: "Patrimônio criado para teste automatizado de empréstimo.",
-    });
+    }));
     assert.ok(patrimonyItem?.id, "Falha ao criar item patrimonial para teste.");
     artifacts.createdInventoryItemIds.push(patrimonyItem?.id || null);
     assert.equal(patrimonyItem.item_type, "patrimony");
 
-    const invalidStockBorrow = database.borrowInventoryItem({
+    const invalidStockBorrow = (await database.borrowInventoryItem({
       nameOrCode: String(createdItem.id),
       quantity: 1,
       userId: adminUser.id,
-    });
+    }));
     assert.equal(
       invalidStockBorrow.success,
       false,
       "Material de estoque não deveria entrar em empréstimo.",
     );
 
-    const invalidPatrimonyWithdraw = database.withdrawInventoryItem({
+    const invalidPatrimonyWithdraw = (await database.withdrawInventoryItem({
       nameOrCode: String(patrimonyItem.id),
       quantity: 1,
       userId: adminUser.id,
-    });
+    }));
     assert.equal(
       invalidPatrimonyWithdraw.success,
       false,
       "Patrimônio não deveria sair pela rota de retirada.",
     );
 
-    const loan = database.borrowInventoryItem({
+    const loan = (await database.borrowInventoryItem({
       nameOrCode: String(patrimonyItem.id),
       quantity: 1,
       userId: adminUser.id,
-    });
+    }));
     assert.equal(loan.success, true, "Falha ao registrar empréstimo patrimonial.");
     assert.equal(loan.loan.status, "active");
 
-    const extension = database.extendInventoryLoan({
+    const extension = (await database.extendInventoryLoan({
       loanId: loan.loan.id,
       extraDays: 5,
       actorUserId: adminUser.id,
-    });
+    }));
     assert.equal(extension.success, true, "Falha ao prorrogar empréstimo.");
 
-    const activeLoans = database.listInventoryLoans({ status: "active" });
+    const activeLoans = (await database.listInventoryLoans({ status: "active" }));
     assert.ok(
       activeLoans.some(
         (entry) =>
@@ -385,13 +391,13 @@ async function main() {
       "Lista de materiais emprestados não registrou o patrimônio de teste.",
     );
 
-    const returnLoan = database.returnInventoryLoan({
+    const returnLoan = (await database.returnInventoryLoan({
       loanId: loan.loan.id,
       actoruserId: adminUser.id,
-    });
+    }));
     assert.equal(returnLoan.success, true, "Falha ao registrar devolução.");
 
-    const dashboard = database.getInventoryDashboardData();
+    const dashboard = (await database.getInventoryDashboardData());
     assert.ok(
       dashboard.summary.item_count >= 1,
       "Resumo do almoxarifado não contabilizou itens.",
@@ -413,7 +419,7 @@ async function main() {
       "Resumo do almoxarifado não contabilizou patrimônio.",
     );
 
-    const requests = database.listInventoryRequests();
+    const requests = (await database.listInventoryRequests());
     assert.ok(
       requests.some(
         (request) =>
@@ -423,7 +429,7 @@ async function main() {
       "Histórico de retiradas não registrou a movimentação de teste.",
     );
 
-    const returnedLoans = database.listInventoryLoans({ status: "returned" });
+    const returnedLoans = (await database.listInventoryLoans({ status: "returned" }));
     assert.ok(
       returnedLoans.some(
         (entry) =>
@@ -442,16 +448,16 @@ async function main() {
       flashMessages: [],
       csrfToken,
       dashboard,
-      users: database.listUsers(),
-      inventoryItems: database.listInventoryItems(),
-      stockItems: database.listInventoryItems({ type: "stock" }),
-      patrimonyItems: database.listInventoryItems({ type: "patrimony" }),
-      categories: database.listInventoryCategories(),
-      locations: database.listInventoryLocations(),
+      users: (await database.listUsers()),
+      inventoryItems: (await database.listInventoryItems()),
+      stockItems: (await database.listInventoryItems({ type: "stock" })),
+      patrimonyItems: (await database.listInventoryItems({ type: "patrimony" })),
+      categories: (await database.listInventoryCategories()),
+      locations: (await database.listInventoryLocations()),
       requests,
-      activeLoans: database.listInventoryLoans({ status: "active" }),
+      activeLoans: (await database.listInventoryLoans({ status: "active" })),
       returnedLoans,
-      overdueLoans: database.listInventoryLoans({ status: "overdue" }),
+      overdueLoans: (await database.listInventoryLoans({ status: "overdue" })),
       userFormData: { name: "", username: "", password: "", role: "common" },
       userErrors: {},
       itemFormData: {
@@ -484,16 +490,16 @@ async function main() {
       flashMessages: [],
       csrfToken,
       dashboard,
-      users: database.listUsers(),
-      inventoryItems: database.listInventoryItems(),
-      stockItems: database.listInventoryItems({ type: "stock" }),
-      patrimonyItems: database.listInventoryItems({ type: "patrimony" }),
-      categories: database.listInventoryCategories(),
-      locations: database.listInventoryLocations(),
+      users: (await database.listUsers()),
+      inventoryItems: (await database.listInventoryItems()),
+      stockItems: (await database.listInventoryItems({ type: "stock" })),
+      patrimonyItems: (await database.listInventoryItems({ type: "patrimony" })),
+      categories: (await database.listInventoryCategories()),
+      locations: (await database.listInventoryLocations()),
       requests,
-      activeLoans: database.listInventoryLoans({ status: "active" }),
+      activeLoans: (await database.listInventoryLoans({ status: "active" })),
       returnedLoans,
-      overdueLoans: database.listInventoryLoans({ status: "overdue" }),
+      overdueLoans: (await database.listInventoryLoans({ status: "overdue" })),
       userFormData: { name: "", username: "", password: "", role: "common" },
       userErrors: {},
       itemFormData: {
@@ -534,7 +540,7 @@ async function main() {
       activeSection: "",
     });
 
-    const createdAta = database.createAta({
+    const createdAta = (await database.createAta({
       projectId: project.id,
       meetingDateTime: "2026-03-29 14:30:00",
       notes: "Reunião de verificação automatizada da migração para Node.js.",
@@ -542,12 +548,12 @@ async function main() {
       justifications: project.active_members[1]
         ? { [project.active_members[1].id]: "Compromisso acadêmico." }
         : {},
-    });
+    }));
 
     assert.ok(createdAta?.id, "Falha ao criar ata na base de teste.");
     artifacts.createdAtaId = createdAta?.id || null;
 
-    const loadedAta = database.getAtaById(createdAta.id);
+    const loadedAta = (await database.getAtaById(createdAta.id));
     assert.ok(loadedAta, "Falha ao recarregar a ata criada.");
     assert.equal(loadedAta.project.id, project.id);
     assert.ok(Array.isArray(loadedAta.present_members));
@@ -564,11 +570,11 @@ async function main() {
 
     console.log("Verificação concluída com sucesso.");
   } finally {
-    cleanupVerifyArtifacts(database, artifacts);
+    (await cleanupVerifyArtifacts(database, artifacts));
   }
 }
 
 main().catch((error) => {
   console.error("Falha na verificação da aplicação:", error);
   process.exitCode = 1;
-});
+}).finally(() => require("../src/postgres").closePool());

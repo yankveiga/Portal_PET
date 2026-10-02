@@ -69,9 +69,14 @@ Arquivo principal:
 Padrao atual:
 
 - PostgreSQL e fonte de verdade.
-- As rotas chamam funcoes sincronas.
-- Internamente existe um worker usando `pg` para executar SQL.
-- `ensureSchema()` cria tabelas, indices e colunas de forma idempotente.
+- As rotas chamam funcoes assincronas com `await`.
+- `src/postgres.js` usa `pg.Pool`; a ponte sincronizada por worker foi removida.
+- `await ensureSchema()` cria tabelas, indices e colunas de forma idempotente.
+- `await createApp()` prepara a aplicacao antes de `listen()`.
+- `withTransaction()` propaga a conexao por `AsyncLocalStorage`: helpers internos participam do mesmo commit/rollback. As transacoes de escrita legadas usam um advisory lock para preservar a exclusao mutua de operacoes compostas.
+- Nao use `forEach(async ...)` nem `filter(async ...)`. Use `for...of` com `await`, os helpers de `src/asyncArray.js`, ou `Promise.all` apenas para leituras independentes.
+- `src/asyncHttp.js` encaminha rejeicoes de rotas e middlewares ao handler de erro do Express 4.
+- `src/databaseAsync.js` e apenas um alias de compatibilidade; novas funcoes pertencem a `src/database.js`.
 
 Quando adicionar tabela/coluna:
 
@@ -313,7 +318,7 @@ npm run dev
 npm start
 npm run verify
 npm run notify:run-once
-node -e "const { createApp } = require('./src/app'); createApp(); console.log('app-ok');"
+npm test
 ```
 
 Logs de rota:
@@ -329,4 +334,10 @@ REQUEST_LOGS=1 npm run dev
 - Criar testes focados para validadores e regras de permissao.
 - Criar metricas simples para rotas pesadas.
 - Reduzir estilos inline antigos em templates de presenca.
-- Migrar gradualmente consultas sincronas para acesso async com pool, se o sistema crescer muito.
+- Substituir gradualmente o advisory lock global por locks de linha especificos, com testes de concorrencia por dominio.
+
+## Testes da migracao assincrona
+
+`npm test` executa verificacoes de advertencias e uma integracao em schema temporario. Cobre rollback, event loop livre durante SQL, concorrencia de estoque e advertencias, tarefas/relatorios, mensagens, presenca e paginas HTTP autenticadas. O schema e removido em `finally`, inclusive quando uma assercao falha. Nao execute `scripts/verify-app.js` diretamente contra dados reais: ele e o teste interno chamado pela rotina isolada.
+
+O pool e encerrado nos scripts e no desligamento do servidor. `PG_POOL_MAX` vale por processo; dimensione o total considerando todas as instancias da aplicacao.

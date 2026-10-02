@@ -7,7 +7,8 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "create-user": "node scripts/create-user.js",
-    "verify": "node scripts/verify-app.js",
+    "verify": "node scripts/verify-isolated.js",
+    "test": "node scripts/verify-warnings.js && node scripts/verify-isolated.js",
     "notify:run-once": "node scripts/run-notifications.js"
   },
   "dependencies": {
