@@ -1037,6 +1037,9 @@ function render(res, template, data = {}) {
       },
     );
 
+    const warningEvents = selectedMember ? (await database.listMemberWarningEvents(selectedMember.id)) : [];
+    const activeWarningEvents = warningEvents.filter((event) => event.is_warning && !event.is_deleted);
+
     return render(res, "reports/index.html", {
       title: "Relatórios",
       activeSection: "reports",
@@ -1045,7 +1048,8 @@ function render(res, template, data = {}) {
       selectedProjectId: selectedProjectId || "",
       selectedMember,
       canManageWarnings,
-      warningEvents: selectedMember ? (await database.listMemberWarningEvents(selectedMember.id)) : [],
+      warningEvents,
+      activeWarningEvents,
       membersSummary,
       reportProjectOptions,
       createGoalProjectOptions,

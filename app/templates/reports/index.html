@@ -603,19 +603,12 @@
  <button type="button" class="report-more-actions-close" id="report_warning_close" aria-label="Fechar">×</button>
  </header>
  <div class="report-warning-content">
- {% if warningEvents.length %}
+ {% if activeWarningEvents.length %}
  <ul class="report-deletion-log-list report-warning-log-list">
- {% for event in warningEvents %}
+ {% for event in activeWarningEvents %}
  <li>
- <strong>{% if event.event_type == 'edited' %}Advertência #{{ event.target_event_id }} editada{% elif event.event_type == 'deleted' %}Advertência #{{ event.target_event_id }} excluída{% elif event.is_warning %}Advertência #{{ event.id }} registrada{% else %}Contagem atualizada{% endif %} · {{ event.previous_count }} → {{ event.new_count }}/3{% if event.is_deleted %} · Excluída{% endif %}</strong>
+ <strong>Advertência #{{ event.id }} registrada · {{ event.previous_count }} → {{ event.new_count }}/3</strong>
  <small>Por {{ event.actor_name or 'Usuário não disponível' }} em {{ event.created_at | formatDateTime }}</small>
- {% if event.event_type == 'edited' %}
- <p>Motivo anterior: {{ event.previous_note or 'Sem motivo registrado.' }}</p>
- <p>Novo motivo: {{ event.note or 'Sem motivo registrado.' }}</p>
- {% else %}
- <p>{{ event.note or 'Sem motivo registrado.' }}</p>
- {% endif %}
- {% if event.is_warning and not event.is_deleted %}
  <p><strong>Motivo atual:</strong> {{ event.current_note or 'Sem motivo registrado.' }}</p>
  {% if canManageWarnings %}
  <details class="report-warning-edit">
@@ -636,12 +629,31 @@
  <button type="submit" class="report-goal-delete-button">Excluir advertência</button>
  </form>
  {% endif %}
- {% endif %}
  </li>
  {% endfor %}
  </ul>
  {% else %}
- <p class="ui-empty-state">Nenhuma advertência registrada para este membro.</p>
+ <p class="ui-empty-state">Nenhuma advertência ativa para este membro.</p>
+ {% endif %}
+
+ {% if warningEvents.length %}
+ <details class="report-warning-history">
+ <summary><ion-icon name="time-outline" aria-hidden="true"></ion-icon>Histórico</summary>
+ <ul class="report-deletion-log-list report-warning-log-list report-warning-history-list">
+ {% for event in warningEvents %}
+ <li>
+ <strong>{% if event.event_type == 'edited' %}Advertência #{{ event.target_event_id }} editada{% elif event.event_type == 'deleted' %}Advertência #{{ event.target_event_id }} excluída{% elif event.is_warning %}Advertência #{{ event.id }} registrada{% else %}Contagem atualizada{% endif %} · {{ event.previous_count }} → {{ event.new_count }}/3{% if event.is_deleted and event.is_warning %} · Excluída{% endif %}</strong>
+ <small>Por {{ event.actor_name or 'Usuário não disponível' }} em {{ event.created_at | formatDateTime }}</small>
+ {% if event.event_type == 'edited' %}
+ <p>Motivo anterior: {{ event.previous_note or 'Sem motivo registrado.' }}</p>
+ <p>Novo motivo: {{ event.note or 'Sem motivo registrado.' }}</p>
+ {% else %}
+ <p>{{ event.note or 'Sem motivo registrado.' }}</p>
+ {% endif %}
+ </li>
+ {% endfor %}
+ </ul>
+ </details>
  {% endif %}
  </div>
  </div>

@@ -79,7 +79,9 @@ const template = fs.readFileSync(path.join(__dirname, '../app/templates/reports/
 for (const canManageWarnings of [true, false]) {
   const html = env.renderString(template, {
     currentUser: {}, selectedMember: { id: 6, name: 'Member', warning_count: 1 },
-    canManageWarnings, warningEvents: [{ id: 1, is_warning: true, current_note: '<script>unsafe</script>' }],
+    canManageWarnings,
+    activeWarningEvents: [{ id: 1, is_warning: true, current_note: '<script>unsafe</script>' }],
+    warningEvents: [{ id: 1, is_warning: true, current_note: '<script>unsafe</script>' }],
     urlFor: () => '/',
   });
   assert.equal(html.includes('name="warning_action" value="edit"'), canManageWarnings);

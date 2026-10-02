@@ -4797,6 +4797,44 @@ body.theme-dark.section-reports .report-tabs-nav {
   background: rgba(248, 250, 252, 0.92);
 }
 
+.report-warning-history {
+  margin-top: 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.24);
+  padding-top: 10px;
+}
+
+.report-warning-history > summary {
+  width: fit-content;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  border: 1px solid rgba(49, 112, 57, 0.24);
+  border-radius: 10px;
+  background: rgba(237, 247, 239, 0.86);
+  color: #1f5130;
+  font-size: 0.86rem;
+  font-weight: 800;
+  padding: 0.45rem 0.78rem;
+  cursor: pointer;
+  list-style: none;
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.report-warning-history > summary::-webkit-details-marker {
+  display: none;
+}
+
+.report-warning-history > summary:hover {
+  transform: translateY(-1px);
+  border-color: rgba(49, 112, 57, 0.36);
+  box-shadow: 0 8px 18px rgba(31, 81, 48, 0.12);
+}
+
+.report-warning-history-list {
+  margin-top: 10px;
+}
+
 .report-extra-panel {
   margin-top: 0;
   border-radius: 14px;

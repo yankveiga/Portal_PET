@@ -1,0 +1,135 @@
+PRINCIPAIS MUDANCAS DA MIGRACAO PARA POOL ASSINCRONO
+
+Este arquivo resume as principais alteracoes feitas na ultima etapa de otimizacao
+do Portal PET, com foco na migracao da camada de banco de dados para pg.Pool
+assincrono.
+
+
+1. O QUE MUDOU
+
+- A comunicacao com o PostgreSQL deixou de usar uma ponte sincrona baseada em
+  Worker, Atomics e chamadas bloqueantes.
+
+- O sistema passou a usar um unico pool assincrono de conexoes com PostgreSQL,
+  centralizado em src/postgres.js.
+
+- As rotas, servicos e scripts que acessam o banco foram ajustados para usar
+  async/await.
+
+- As transacoes agora usam conexoes do pool e mantem a mesma conexao durante
+  toda a operacao.
+
+- As chamadas aninhadas ao banco dentro de uma transacao reutilizam a conexao
+  correta automaticamente.
+
+- Foi criado um encaminhamento de erros assincronos para o Express, evitando
+  que rotas com Promise rejeitada fiquem presas ou derrubem o fluxo sem passar
+  pelo tratamento normal de erro.
+
+- Os scripts de verificacao e manutencao tambem foram atualizados para abrir e
+  fechar o pool corretamente.
+
+- A documentacao principal e o guia de desenvolvimento foram atualizados para
+  explicar o novo padrao.
+
+
+2. O QUE E UM POOL ASSINCRONO?
+
+Um pool de conexoes e um conjunto de conexoes ja prontas com o banco de dados.
+
+Em vez de abrir uma conexao nova toda vez que alguem acessa uma pagina, o
+sistema reaproveita conexoes existentes. Isso reduz custo, evita atrasos
+desnecessarios e melhora a estabilidade quando varias pessoas usam o portal ao
+mesmo tempo.
+
+O termo "assincrono" significa que o Node.js nao fica travado esperando o banco
+responder. Enquanto uma consulta esta em andamento, o servidor pode continuar
+atendendo outras requisicoes.
+
+Na pratica:
+
+- antes, uma consulta lenta podia segurar o fluxo do servidor;
+- agora, o Node.js consegue esperar o PostgreSQL sem bloquear o restante da
+  aplicacao;
+- varias consultas independentes podem compartilhar o pool de forma mais
+  eficiente;
+- o sistema fica mais preparado para hospedagem real, como Render, PET ou outro
+  servidor.
+
+
+3. POR QUE ISSO AJUDA NA VELOCIDADE?
+
+O ganho principal nao e transformar uma consulta pesada em leve sozinho. O pool
+assincrono melhora principalmente a capacidade do servidor de nao travar enquanto
+espera o banco.
+
+Isso ajuda em situacoes como:
+
+- varias pessoas usando o sistema ao mesmo tempo;
+- paginas que fazem consultas ao banco;
+- operacoes do almoxarifado, relatorios, presenca, planner, chat e advertencias;
+- servidor hospedado com recurso limitado;
+- banco remoto, onde existe latencia de rede.
+
+Tambem facilita otimizar partes especificas no futuro, porque agora a base esta
+mais alinhada com o funcionamento natural do Node.js.
+
+
+4. O QUE FOI PRESERVADO
+
+- Os nomes principais das funcoes de banco foram mantidos.
+
+- A estrutura geral do projeto foi preservada.
+
+- Nao foi criado outro banco nem outra arquitetura paralela.
+
+- O modulo src/databaseAsync.js ficou como compatibilidade, reaproveitando a
+  implementacao principal.
+
+- O comportamento das permissoes, relatorios, almoxarifado, presenca, planner,
+  chat, atas e advertencias foi mantido.
+
+
+5. TRANSACOES E SEGURANCA
+
+As operacoes de escrita importantes continuam protegidas por transacoes.
+
+Isso significa que, se uma etapa falhar, a operacao pode ser desfeita pelo banco
+em vez de deixar dados pela metade.
+
+Tambem foi mantido um bloqueio transacional global para preservar a seguranca de
+operacoes compostas que dependem de leitura antes da escrita. Esse bloqueio evita
+certas condicoes de corrida e mantem o comportamento previsivel.
+
+No futuro, esse bloqueio pode ser trocado por travas mais especificas por linha
+ou por entidade, caso seja necessario extrair ainda mais desempenho.
+
+
+6. TESTES
+
+Foi adicionado um teste isolado que cria um schema temporario no PostgreSQL,
+executa verificacoes e depois remove os dados temporarios.
+
+O comando npm test passou cobrindo:
+
+- ciclo de advertencias;
+- permissoes;
+- transacoes;
+- concorrencia;
+- paginas autenticadas;
+- almoxarifado;
+- planner;
+- relatorios;
+- chat;
+- presenca;
+- scripts de verificacao.
+
+
+7. PENDENCIA CONHECIDA
+
+A pasta .migration-tools foi usada apenas como apoio temporario durante a
+migracao. Ela nao e usada pelo sistema e pode ser apagada manualmente.
+
+Caminho:
+C:\Users\Yan\Documents\Github\Portal_PET\.migration-tools
+
