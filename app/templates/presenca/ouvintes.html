@@ -7,7 +7,7 @@
     <header class="page-header page-header-split">
         <div>
             <h1>Ouvintes</h1>
-            <p class="lead">Cadastre a lista geral de ouvintes e vincule às atividades depois.</p>
+            <p class="lead">Novos ouvintes são vinculados automaticamente a todos os eventos cadastrados.</p>
         </div>
         {% if selectedEvent %}
         <a class="btn-secondary-action" href="{{ urlFor('presenca_export_csv', { id: selectedEvent.id }) }}" style="text-decoration:none;white-space:nowrap">
@@ -26,7 +26,7 @@
         <div class="presence-flow-step {{ 'is-active' if selectedEvent else '' }}">
             <span>2</span>
             <strong>Atividade</strong>
-            <small>Selecione para vincular</small>
+            <small>Vínculo automático no cadastro</small>
         </div>
         <div class="presence-flow-step {{ 'is-active' if selectedEvent and selectedEvent.attendee_count else '' }}">
             <span>3</span>
@@ -81,7 +81,7 @@
             <div class="panel-header">
                 <div>
                     <h2>Adicionar manualmente</h2>
-                    <p>Para poucos ouvintes ou correções rápidas.</p>
+                    <p>Ao salvar, o ouvinte será vinculado a todos os eventos cadastrados.</p>
                 </div>
             </div>
             <div class="panel-body">
@@ -136,7 +136,7 @@
                         <label class="form-label" for="csv_text">Ou colar dados</label>
                         <textarea id="csv_text" name="csv_text" class="form-control" rows="5" placeholder="cracha,nome,cpf,email&#10;A001,João Silva,000.000.000-00,joao@ex.com"></textarea>
                     </div>
-                    <p class="presence-import-note">Colunas esperadas: <code>cracha,nome,cpf,email</code>. {% if selectedEvent %}Como há atividade selecionada, a importação também vincula à atividade.{% else %}Sem atividade selecionada, importa apenas para a lista geral.{% endif %}</p>
+                    <p class="presence-import-note">Colunas esperadas: <code>cracha,nome,cpf,email</code>. Os ouvintes importados serão vinculados a todos os eventos cadastrados, inclusive os repetidos. A presença será registrada no check-in.</p>
                     <button class="btn-secondary-action" type="submit">
                         <ion-icon name="eye-outline"></ion-icon>
                         Pré-visualizar
@@ -226,7 +226,7 @@
         <div class="panel-header">
             <div>
                 <h2>Lista de ouvintes</h2>
-                <p>{% if selectedEvent %}Use o botão de vínculo para colocar ouvintes nesta atividade.{% else %}Base geral de ouvintes: quem pagou/foi cadastrado aparece aqui antes da presença.{% endif %}</p>
+                <p>Base geral de ouvintes. O vínculo aos eventos não registra presença.</p>
             </div>
             <form method="get" action="{{ urlFor('presenca_ouvintes') }}" class="presence-search-form" role="search">
                 <input type="hidden" name="event_id" value="{{ selectedEvent.id if selectedEvent else '' }}">
@@ -234,6 +234,27 @@
             </form>
         </div>
         <div class="panel-body">
+            {% if isAdmin %}
+            <div class="presence-preview-actions">
+                <form method="post" action="/presenca/ouvintes/vincular-todos" class="inline-action-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrfToken }}">
+                    <input type="hidden" name="event_id" value="{{ selectedEvent.id if selectedEvent else '' }}">
+                    <button class="btn-secondary-action" type="submit" {% if not events.length %}disabled{% endif %}>
+                        <ion-icon name="link-outline"></ion-icon>
+                        Vincular todos
+                    </button>
+                </form>
+                <form method="post" action="/presenca/ouvintes/excluir-todos" class="inline-action-form" onsubmit="return confirm('Excluir TODOS os ouvintes da base, seus vínculos e presenças em todos os eventos? A busca não limita esta ação. Essa ação não pode ser desfeita.')">
+                    <input type="hidden" name="csrf_token" value="{{ csrfToken }}">
+                    <input type="hidden" name="confirm_delete_all" value="1">
+                    <button class="danger-button" type="submit">
+                        <ion-icon name="trash-outline"></ion-icon>
+                        Excluir todos
+                    </button>
+                </form>
+                <small>As ações abrangem toda a base, mesmo com uma busca ativa. Vincular todos inclui todos os eventos cadastrados.</small>
+            </div>
+            {% endif %}
             <div class="presence-table-wrap">
                 <table class="styled-table presence-table">
                     <thead>

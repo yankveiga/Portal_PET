@@ -6505,6 +6505,7 @@ async function createAttendee(payload) {
     `,
     )
     .run(payload.name, payload.cpf || null, payload.email || null, payload.badgeCode));
+  await attachAttendeesToAllEvents({ attendeeId: inserted.lastInsertRowid });
   return (await getAttendeeById(inserted.lastInsertRowid));
 
   });
@@ -6557,6 +6558,30 @@ async function deleteAttendee(id) {
     }
     return (await db.prepare("DELETE FROM attendee WHERE id = ?").run(id)).changes > 0;
   }));
+}
+
+// Vincula a base inteira (ou um ouvinte) sem substituir registros de presença.
+async function attachAttendeesToAllEvents({ attendeeId = null } = {}) {
+  return withTransaction(async (db) => {
+    const params = attendeeId === null ? [] : [attendeeId];
+    return (await db.prepare(`
+      INSERT INTO event_attendee (event_id, attendee_id, name, cpf, email, badge_code)
+      SELECT e.id, a.id, a.name, a.cpf, a.email, a.badge_code
+      FROM event e CROSS JOIN attendee a
+      ${attendeeId === null ? "" : "WHERE a.id = ?"}
+      ON CONFLICT (event_id, badge_code) DO UPDATE
+      SET attendee_id = EXCLUDED.attendee_id,
+          name = EXCLUDED.name, cpf = EXCLUDED.cpf, email = EXCLUDED.email
+    `).run(...params)).changes;
+  });
+}
+
+async function deleteAllAttendees() {
+  return withTransaction(async (db) => {
+    await db.prepare("DELETE FROM event_attendance").run();
+    await db.prepare("DELETE FROM event_attendee").run();
+    return (await db.prepare("DELETE FROM attendee").run()).changes;
+  });
 }
 
 async function attachAttendeeToEvent({ eventId, attendeeId }) {
@@ -6920,6 +6945,7 @@ async function listPresenceMatrixRows() {
 // OBSERVACAO: alteracoes de nomes exportados exigem ajuste imediato nos imports de rotas/servicos.
 
 module.exports = {
+  attachAttendeesToAllEvents,
   attachAttendeeToEvent,
   createAta,
   createAttendee,
@@ -6935,6 +6961,7 @@ module.exports = {
   deactivateMember,
   deleteAta,
   deleteAttendee,
+  deleteAllAttendees,
   deleteEvent,
   deleteEventAttendee,
   deleteReportEntry,

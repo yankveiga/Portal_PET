@@ -81,10 +81,20 @@ async function main() {
     await database.createChatMessage({ conversationId: conversation.id, authorUserId: adminUser.id, text: "Mensagem isolada" });
     assert.equal((await database.listChatMessagesForConversation(conversation.id)).length, 1);
     const event = await database.createEvent({ name: "Evento isolado" });
+    const otherEvent = await database.createEvent({ name: "Outro evento isolado" });
+    await database.updateEvent({ id: otherEvent.id, name: otherEvent.name, isActive: false });
     const attendee = await database.createAttendee({ name: "Ouvinte isolado", badgeCode: "isolated-badge" });
+    assert.equal((await database.listAttendees()).find(row => row.id === attendee.id).event_count, 2);
+    assert.equal((await database.getEventById(otherEvent.id)).present_count, 0);
     await database.attachAttendeeToEvent({ eventId: event.id, attendeeId: attendee.id });
     assert.equal((await database.registerEventAttendance({ eventId: event.id, badgeCode: "isolated-badge", checkedInByUserId: adminUser.id })).success, true);
     assert.equal((await database.registerEventAttendance({ eventId: event.id, badgeCode: "isolated-badge", checkedInByUserId: adminUser.id })).success, false);
+    const laterEvent = await database.createEvent({ name: "Evento posterior" });
+    await database.attachAttendeesToAllEvents();
+    await database.attachAttendeesToAllEvents();
+    assert.equal((await database.getEventById(laterEvent.id)).attendee_count, 1);
+    assert.equal((await database.getEventById(event.id)).present_count, 1);
+    assert.equal((await database.listAttendees()).find(row => row.id === attendee.id).event_count, 3);
     await database.upsertReportFortnightMemberNote({ memberId: member.id, authorUserId: adminUser.id, weekStart: "2026-10-01", content: "Complemento de teste" });
     assert.equal((await database.getReportFortnightMemberNote({ memberId: member.id, weekStart: "2026-10-01" })).content, "Complemento de teste");
     const { generateMonthlyReportPdf } = require("../src/pdf");
@@ -119,7 +129,36 @@ async function main() {
       assert.equal(response.status, 200, `${path}: ${content.slice(0,180)}`);
       assert.ok(!content.includes("[object Promise]"), `${path}: Promise no HTML`);
     }
-    console.log("Transacoes, event loop e paginas autenticadas: OK");
+    async function postPresence(path, data = {}, token = csrf) {
+      return request(path, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf_token: token, ...data }) });
+    }
+    assert.equal((await postPresence("/presenca/ouvintes/criar", { name: "Cadastro manual", badge_code: "manual-badge" })).status, 302);
+    assert.equal((await database.listAttendees()).find(row => row.badge_code === "manual-badge").event_count, 3);
+    const imported = await postPresence("/presenca/ouvintes/importar/confirmar", {
+      import_payload_json: JSON.stringify([{ attendee: { name: "Importado", badgeCode: "csv-badge" } }]),
+    });
+    assert.equal(imported.status, 200);
+    assert.equal((await database.listAttendees()).find(row => row.badge_code === "csv-badge").event_count, 3);
+    const newestEvent = await database.createEvent({ name: "Evento para vínculo em lote" });
+    const duplicateImport = await postPresence("/presenca/ouvintes/importar/confirmar", {
+      duplicate_mode: "ignore",
+      import_payload_json: JSON.stringify([{ existingId: attendee.id, attendee: { name: attendee.name, badgeCode: attendee.badge_code } }]),
+    });
+    assert.equal(duplicateImport.status, 200);
+    assert.equal((await database.getEventById(newestEvent.id)).attendee_count, 1);
+    assert.equal((await postPresence("/presenca/ouvintes/vincular-todos")).status, 302);
+    assert.equal((await database.getEventById(newestEvent.id)).attendee_count, 3);
+    assert.equal((await database.getEventById(event.id)).present_count, 1);
+    await postPresence("/presenca/ouvintes/excluir-todos", { confirm_delete_all: "1" }, "invalid-token");
+    assert.equal((await database.listAttendees()).length, 3);
+    await postPresence("/presenca/ouvintes/excluir-todos");
+    assert.equal((await database.listAttendees()).length, 3);
+    assert.equal((await postPresence("/presenca/ouvintes/excluir-todos", { confirm_delete_all: "1" })).status, 302);
+    assert.equal((await database.listAttendees()).length, 0);
+    assert.equal((await database.listEventAttendees(event.id)).length, 0);
+    assert.equal((await database.getEventById(event.id)).present_count, 0);
+    assert.equal((await database.listEvents()).length, 4);
+    console.log("Transacoes, event loop, paginas autenticadas e acoes em lote de ouvintes: OK");
   } finally {
     if (server) await new Promise(resolve=>server.close(resolve));
     await require("../src/postgres").closePool();

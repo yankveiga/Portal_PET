@@ -5,6 +5,9 @@ const A4_WIDTH_MM = 210;
 const A4_HEIGHT_MM = 297;
 const SHEET_MARGIN_MM = 5;
 const BADGE_GAP_MM = 2.5;
+const BARCODE_PADDING_MM = 1.5;
+const BARCODE_MIN_QUIET_ZONE_MM = 2.54;
+const BARCODE_QUIET_ZONE_MODULES = 10;
 
 const CODE39 = Object.freeze({
   "0": "nnnwwnwnn",
@@ -121,6 +124,12 @@ function validateBadgeForm(formData, file) {
       errors[key] = [`${label} deve ser maior que zero.`];
     }
   });
+  if (formData.barcodeHeightMm && formData.barcodeHeightMm < 12) {
+    errors.barcodeHeightMm = ["Use pelo menos 12 mm de altura para acomodar as barras, o numero e as margens brancas."];
+  }
+  if (formData.barcodeWidthMm && formData.barcodeWidthMm <= BARCODE_MIN_QUIET_ZONE_MM * 2) {
+    errors.barcodeWidthMm = ["A largura deve ser maior que 5,08 mm para acomodar as margens brancas laterais."];
+  }
   if (formData.barcodeXMm === null) {
     errors.barcodeXMm = ["X deve ser zero ou maior."];
   }
@@ -208,9 +217,19 @@ function drawCode39(doc, text, x, y, width, height) {
   const encoded = `*${text.toUpperCase()}*`;
   const fontSize = Math.min(12, Math.max(8, height * 0.22));
   const labelHeight = fontSize + 4;
-  const barHeight = Math.max(8, height - labelHeight);
-  const quietZone = Math.min(width * 0.02, 6);
-  const narrow = (width - quietZone * 2) / countCode39Modules(text);
+  const padding = mmToPt(BARCODE_PADDING_MM);
+  const labelGap = mmToPt(1);
+  const barHeight = height - padding * 2 - labelGap - labelHeight;
+  const modules = countCode39Modules(text);
+  // Reserva pelo menos dez modulos estreitos e 2,54 mm em cada lateral.
+  const narrow = Math.min(
+    width / (modules + BARCODE_QUIET_ZONE_MODULES * 2),
+    (width - mmToPt(BARCODE_MIN_QUIET_ZONE_MM) * 2) / modules,
+  );
+  if (narrow <= 0 || barHeight <= 0) {
+    throw new Error("Aumente a area do codigo de barras para acomodar as margens brancas.");
+  }
+  const quietZone = (width - narrow * modules) / 2;
   const wide = narrow * 3;
   let cursorX = x + quietZone;
 
@@ -223,7 +242,7 @@ function drawCode39(doc, text, x, y, width, height) {
     pattern.split("").forEach((part, index) => {
       const segmentWidth = part === "w" ? wide : narrow;
       if (index % 2 === 0) {
-        doc.rect(cursorX, y, segmentWidth, barHeight).fill("#000000");
+        doc.rect(cursorX, y + padding, segmentWidth, barHeight).fill("#000000");
       }
       cursorX += segmentWidth;
     });
@@ -236,8 +255,8 @@ function drawCode39(doc, text, x, y, width, height) {
     .font("Helvetica")
     .fontSize(fontSize)
     .fillColor("#000000")
-    .text(text, x, y + barHeight + 1, {
-      width,
+    .text(text, x + quietZone, y + padding + barHeight + labelGap, {
+      width: width - quietZone * 2,
       align: "center",
       lineBreak: false,
     });

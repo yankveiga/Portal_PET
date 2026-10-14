@@ -105,7 +105,7 @@
                     <section class="presence-badge-section">
                         <div class="presence-badge-section-head">
                             <h3>Código de barras</h3>
-                            <p>Posicione o código dentro da arte enviada.</p>
+                            <p>Posicione a caixa branca dentro da arte. As medidas incluem as margens de leitura, as barras e o número.</p>
                         </div>
                         <div class="form-grid-two">
                             <div class="form-group">
@@ -119,6 +119,7 @@
                             <div class="form-group">
                                 <label for="barcode_height_mm">Altura do código de barras (mm)</label>
                                 <input id="barcode_height_mm" type="text" name="barcode_height_mm" class="form-control" inputmode="decimal" value="{{ badgeFormData.barcode_height_mm }}" required>
+                                <small class="form-hint">Mínimo de 12 mm. O PDF mantém margens brancas ao redor do código.</small>
                                 {% if badgeErrors.barcodeHeightMm %}
                                 <small class="field-error">{{ badgeErrors.barcodeHeightMm[0] }}</small>
                                 {% endif %}

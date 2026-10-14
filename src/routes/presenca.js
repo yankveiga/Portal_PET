@@ -444,7 +444,7 @@ function registerPresenceRoutes(ctx) {
     return res.redirect(urlFor("presenca_eventos"));
   });
 
-  // Cria um ouvinte e, se houver evento selecionado, ja vincula os dois.
+  // Cria um ouvinte com vinculo automatico a todos os eventos cadastrados.
   app.post("/presenca/ouvintes/criar", requireAuth, requireAdminPage, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
@@ -460,15 +460,41 @@ function registerPresenceRoutes(ctx) {
       }));
     }
     try {
-      const attendee = (await database.createAttendee(formData));
-      if (eventId) {
-        (await database.attachAttendeeToEvent({ eventId, attendeeId: attendee.id }));
-      }
-      req.flash("success", eventId ? "Ouvinte cadastrado e vinculado ao evento." : "Ouvinte cadastrado.");
+      await database.createAttendee(formData);
+      req.flash("success", "Ouvinte cadastrado e vinculado a todos os eventos cadastrados.");
     } catch (error) {
       req.flash("danger", `Erro ao adicionar ouvinte: ${error.message}`);
     }
     return res.redirect(`${urlFor("presenca_ouvintes")}${buildEventQuery(eventId)}`);
+  });
+
+  // Acoes em lote sobre toda a base, independentemente do filtro de busca.
+  app.post("/presenca/ouvintes/vincular-todos", requireAuth, requireAdminPage, async (req, res) => {
+    if (!ensureValidCsrf(req, res)) return;
+    try {
+      await database.attachAttendeesToAllEvents();
+      req.flash("success", "Todos os ouvintes foram vinculados a todos os eventos cadastrados.");
+    } catch (error) {
+      logError(req, "Erro ao vincular todos os ouvintes:", error);
+      req.flash("danger", "Não foi possível vincular todos os ouvintes.");
+    }
+    return res.redirect(`${urlFor("presenca_ouvintes")}${buildEventQuery(parseId(req.body.event_id))}`);
+  });
+
+  app.post("/presenca/ouvintes/excluir-todos", requireAuth, requireAdminPage, async (req, res) => {
+    if (!ensureValidCsrf(req, res)) return;
+    if (req.body.confirm_delete_all !== "1") {
+      req.flash("danger", "Confirme a exclusão de todos os ouvintes.");
+      return res.redirect(urlFor("presenca_ouvintes"));
+    }
+    try {
+      const count = await database.deleteAllAttendees();
+      req.flash("success", `${count} ouvinte(s) excluído(s), com seus vínculos e presenças.`);
+    } catch (error) {
+      logError(req, "Erro ao excluir todos os ouvintes:", error);
+      req.flash("danger", "Não foi possível excluir todos os ouvintes.");
+    }
+    return res.redirect(urlFor("presenca_ouvintes"));
   });
 
   // Edita os dados cadastrais de um ouvinte.
@@ -613,22 +639,15 @@ function registerPresenceRoutes(ctx) {
         if (row.existingId) {
           if (duplicateMode === "update") {
             (await database.updateAttendee({ id: row.existingId, ...attendee }));
-            if (event) {
-              (await database.attachAttendeeToEvent({ eventId: event.id, attendeeId: row.existingId }));
-            }
+            await database.attachAttendeesToAllEvents({ attendeeId: row.existingId });
             summary.updated += 1;
           } else {
-            if (event) {
-              (await database.attachAttendeeToEvent({ eventId: event.id, attendeeId: row.existingId }));
-            }
+            await database.attachAttendeesToAllEvents({ attendeeId: row.existingId });
             summary.skipped += 1;
           }
           return;
         }
-        const created = (await database.createAttendee(attendee));
-        if (event) {
-          (await database.attachAttendeeToEvent({ eventId: event.id, attendeeId: created.id }));
-        }
+        await database.createAttendee(attendee);
         summary.imported += 1;
       } catch (_error) {
         summary.errors += 1;
