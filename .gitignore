@@ -13,7 +13,9 @@ env/    # Outro nome comum
 # IDEs e ferramentas de projeto
 .vscode/
 .idea/
-.codex
+.codex/
+.agents/
+.playwright-cli/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -28,7 +30,7 @@ instance/
 .env
 *.env* # Para cobrir .env.development, .env.production etc.
 !.env.example # Frequentemente se versiona um exemplo
-.skills-lock.json
+skills-lock.json
 
 # Logs e arquivos de upload (se não quiser versionar logos)
 *.log
