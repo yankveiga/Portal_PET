@@ -11,102 +11,270 @@
     </div>
 
     <div class="panel-body">
-        <form method="post" action="{{ urlFor('presenca_crachas_generate') }}" enctype="multipart/form-data" class="stacked-form">
+        <form method="post" action="{{ urlFor('presenca_crachas_generate') }}" enctype="multipart/form-data" class="stacked-form presence-badge-form">
             <input type="hidden" name="csrf_token" value="{{ csrfToken }}">
 
-            <div class="form-group">
-                <label for="base_image">Imagem modelo do crachá</label>
-                <input id="base_image" type="file" name="base_image" class="form-control" accept="image/png,image/jpeg" required>
-                {% if badgeErrors.baseImage %}
-                <small class="field-error">{{ badgeErrors.baseImage[0] }}</small>
-                {% endif %}
+            <div class="presence-badge-workspace">
+                <div class="presence-badge-fields">
+                    <section class="presence-badge-section presence-badge-section-upload">
+                        <div class="presence-badge-section-head">
+                            <h3>Modelo visual</h3>
+                            <p>Envie a arte do crachá em PNG ou JPG.</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="base_image">Imagem modelo do crachá</label>
+                            <input id="base_image" type="file" name="base_image" class="form-control" accept="image/png,image/jpeg" required>
+                            {% if badgeErrors.baseImage %}
+                            <small class="field-error">{{ badgeErrors.baseImage[0] }}</small>
+                            {% endif %}
+                        </div>
+                    </section>
+
+                    <section class="presence-badge-section">
+                        <div class="presence-badge-section-head">
+                            <h3>Numeração</h3>
+                            <p>Defina a sequência dos códigos gerados no Code39.</p>
+                        </div>
+                        <div class="form-grid-two">
+                            <div class="form-group">
+                                <label for="first_code">Primeiro código</label>
+                                <input id="first_code" type="number" name="first_code" class="form-control" min="1" step="1" value="{{ badgeFormData.first_code }}" required>
+                                {% if badgeErrors.firstCode %}
+                                <small class="field-error">{{ badgeErrors.firstCode[0] }}</small>
+                                {% endif %}
+                            </div>
+
+                            <div class="form-group">
+                                <label for="last_code">Último código</label>
+                                <input id="last_code" type="number" name="last_code" class="form-control" min="1" step="1" value="{{ badgeFormData.last_code }}">
+                                {% if badgeErrors.lastCode %}
+                                <small class="field-error">{{ badgeErrors.lastCode[0] }}</small>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="total_badges">Quantidade, caso prefira ignorar o último código</label>
+                            <input id="total_badges" type="number" name="total_badges" class="form-control" min="1" max="1000" step="1" value="{{ badgeFormData.total_badges }}">
+                            {% if badgeErrors.totalBadges %}
+                            <small class="field-error">{{ badgeErrors.totalBadges[0] }}</small>
+                            {% endif %}
+                        </div>
+                    </section>
+
+                    <section class="presence-badge-section">
+                        <div class="presence-badge-section-head">
+                            <h3>Página e corte</h3>
+                            <p>O Portal calcula o encaixe em A4 com 5 mm de margem e 2,5 mm entre crachás.</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="badges_per_page">Crachás por página</label>
+                            <input id="badges_per_page" type="number" name="badges_per_page" class="form-control" min="1" max="20" step="1" value="{{ badgeFormData.badges_per_page or '1' }}" required aria-describedby="badge_layout_hint">
+                            <small id="badge_layout_hint" class="form-hint">Use 1 para manter um crachá por página. Acima disso, o PDF usa folha A4 com margem pequena para corte e distribui lado a lado, depois embaixo.</small>
+                            {% if badgeErrors.badgesPerPage %}
+                            <small class="field-error">{{ badgeErrors.badgesPerPage[0] }}</small>
+                            {% endif %}
+                            <div id="badge_layout_preview" class="presence-badge-layout-preview" aria-live="polite"></div>
+                        </div>
+                    </section>
+
+                    <section class="presence-badge-section">
+                        <div class="presence-badge-section-head">
+                            <h3>Medidas do crachá</h3>
+                            <p>Informe a área final de cada crachá em milímetros.</p>
+                        </div>
+                        <div class="form-grid-two">
+                            <div class="form-group">
+                                <label for="badge_width_mm">Largura do crachá (mm)</label>
+                                <input id="badge_width_mm" type="text" name="badge_width_mm" class="form-control" inputmode="decimal" value="{{ badgeFormData.badge_width_mm }}" required>
+                                {% if badgeErrors.badgeWidthMm %}
+                                <small class="field-error">{{ badgeErrors.badgeWidthMm[0] }}</small>
+                                {% endif %}
+                            </div>
+
+                            <div class="form-group">
+                                <label for="badge_height_mm">Altura do crachá (mm)</label>
+                                <input id="badge_height_mm" type="text" name="badge_height_mm" class="form-control" inputmode="decimal" value="{{ badgeFormData.badge_height_mm }}" required>
+                                {% if badgeErrors.badgeHeightMm %}
+                                <small class="field-error">{{ badgeErrors.badgeHeightMm[0] }}</small>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="presence-badge-section">
+                        <div class="presence-badge-section-head">
+                            <h3>Código de barras</h3>
+                            <p>Posicione o código dentro da arte enviada.</p>
+                        </div>
+                        <div class="form-grid-two">
+                            <div class="form-group">
+                                <label for="barcode_width_mm">Largura do código de barras (mm)</label>
+                                <input id="barcode_width_mm" type="text" name="barcode_width_mm" class="form-control" inputmode="decimal" value="{{ badgeFormData.barcode_width_mm }}" required>
+                                {% if badgeErrors.barcodeWidthMm %}
+                                <small class="field-error">{{ badgeErrors.barcodeWidthMm[0] }}</small>
+                                {% endif %}
+                            </div>
+
+                            <div class="form-group">
+                                <label for="barcode_height_mm">Altura do código de barras (mm)</label>
+                                <input id="barcode_height_mm" type="text" name="barcode_height_mm" class="form-control" inputmode="decimal" value="{{ badgeFormData.barcode_height_mm }}" required>
+                                {% if badgeErrors.barcodeHeightMm %}
+                                <small class="field-error">{{ badgeErrors.barcodeHeightMm[0] }}</small>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="form-grid-two">
+                            <div class="form-group">
+                                <label for="barcode_x_mm">Posição X do código (mm)</label>
+                                <input id="barcode_x_mm" type="text" name="barcode_x_mm" class="form-control" inputmode="decimal" value="{{ badgeFormData.barcode_x_mm }}" required>
+                                {% if badgeErrors.barcodeXMm %}
+                                <small class="field-error">{{ badgeErrors.barcodeXMm[0] }}</small>
+                                {% endif %}
+                            </div>
+
+                            <div class="form-group">
+                                <label for="barcode_y_mm">Posição Y do código (mm)</label>
+                                <input id="barcode_y_mm" type="text" name="barcode_y_mm" class="form-control" inputmode="decimal" value="{{ badgeFormData.barcode_y_mm }}" required>
+                                {% if badgeErrors.barcodeYMm %}
+                                <small class="field-error">{{ badgeErrors.barcodeYMm[0] }}</small>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <aside class="presence-badge-preview-card" aria-label="Resumo visual do PDF">
+                    <div class="presence-badge-sheet">
+                        <div class="presence-badge-mini-grid" id="badge_mini_grid" aria-hidden="true">
+                            <span></span>
+                        </div>
+                    </div>
+                    <div class="presence-badge-preview-copy">
+                        <h3>Prévia do encaixe</h3>
+                        <p id="badge_preview_summary">Ajuste as medidas para ver como os crachás entram na folha.</p>
+                        <dl>
+                            <div>
+                                <dt>Folha</dt>
+                                <dd>A4</dd>
+                            </div>
+                            <div>
+                                <dt>Margem</dt>
+                                <dd>5 mm</dd>
+                            </div>
+                            <div>
+                                <dt>Entre crachás</dt>
+                                <dd>2,5 mm</dd>
+                            </div>
+                        </dl>
+                    </div>
+                    <button type="submit" class="btn-primary-action presence-badge-submit">
+                        <ion-icon name="download-outline"></ion-icon>
+                        Gerar PDF
+                    </button>
+                </aside>
             </div>
-
-            <div class="form-grid-two">
-                <div class="form-group">
-                    <label for="first_code">Primeiro código</label>
-                    <input id="first_code" type="number" name="first_code" class="form-control" min="1" step="1" value="{{ badgeFormData.first_code }}" required>
-                    {% if badgeErrors.firstCode %}
-                    <small class="field-error">{{ badgeErrors.firstCode[0] }}</small>
-                    {% endif %}
-                </div>
-
-                <div class="form-group">
-                    <label for="last_code">Último código</label>
-                    <input id="last_code" type="number" name="last_code" class="form-control" min="1" step="1" value="{{ badgeFormData.last_code }}">
-                    {% if badgeErrors.lastCode %}
-                    <small class="field-error">{{ badgeErrors.lastCode[0] }}</small>
-                    {% endif %}
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label for="total_badges">Quantidade, caso prefira ignorar o último código</label>
-                <input id="total_badges" type="number" name="total_badges" class="form-control" min="1" max="1000" step="1" value="{{ badgeFormData.total_badges }}">
-                {% if badgeErrors.totalBadges %}
-                <small class="field-error">{{ badgeErrors.totalBadges[0] }}</small>
-                {% endif %}
-            </div>
-
-            <div class="form-grid-two">
-                <div class="form-group">
-                    <label for="badge_width_cm">Largura do crachá (cm)</label>
-                    <input id="badge_width_cm" type="text" name="badge_width_cm" class="form-control" inputmode="decimal" value="{{ badgeFormData.badge_width_cm }}" required>
-                    {% if badgeErrors.badgeWidthCm %}
-                    <small class="field-error">{{ badgeErrors.badgeWidthCm[0] }}</small>
-                    {% endif %}
-                </div>
-
-                <div class="form-group">
-                    <label for="badge_height_cm">Altura do crachá (cm)</label>
-                    <input id="badge_height_cm" type="text" name="badge_height_cm" class="form-control" inputmode="decimal" value="{{ badgeFormData.badge_height_cm }}" required>
-                    {% if badgeErrors.badgeHeightCm %}
-                    <small class="field-error">{{ badgeErrors.badgeHeightCm[0] }}</small>
-                    {% endif %}
-                </div>
-            </div>
-
-            <div class="form-grid-two">
-                <div class="form-group">
-                    <label for="barcode_width_cm">Largura do código de barras (cm)</label>
-                    <input id="barcode_width_cm" type="text" name="barcode_width_cm" class="form-control" inputmode="decimal" value="{{ badgeFormData.barcode_width_cm }}" required>
-                    {% if badgeErrors.barcodeWidthCm %}
-                    <small class="field-error">{{ badgeErrors.barcodeWidthCm[0] }}</small>
-                    {% endif %}
-                </div>
-
-                <div class="form-group">
-                    <label for="barcode_height_cm">Altura do código de barras (cm)</label>
-                    <input id="barcode_height_cm" type="text" name="barcode_height_cm" class="form-control" inputmode="decimal" value="{{ badgeFormData.barcode_height_cm }}" required>
-                    {% if badgeErrors.barcodeHeightCm %}
-                    <small class="field-error">{{ badgeErrors.barcodeHeightCm[0] }}</small>
-                    {% endif %}
-                </div>
-            </div>
-
-            <div class="form-grid-two">
-                <div class="form-group">
-                    <label for="barcode_x_cm">Posição X do código (cm)</label>
-                    <input id="barcode_x_cm" type="text" name="barcode_x_cm" class="form-control" inputmode="decimal" value="{{ badgeFormData.barcode_x_cm }}" required>
-                    {% if badgeErrors.barcodeXCm %}
-                    <small class="field-error">{{ badgeErrors.barcodeXCm[0] }}</small>
-                    {% endif %}
-                </div>
-
-                <div class="form-group">
-                    <label for="barcode_y_cm">Posição Y do código (cm)</label>
-                    <input id="barcode_y_cm" type="text" name="barcode_y_cm" class="form-control" inputmode="decimal" value="{{ badgeFormData.barcode_y_cm }}" required>
-                    {% if badgeErrors.barcodeYCm %}
-                    <small class="field-error">{{ badgeErrors.barcodeYCm[0] }}</small>
-                    {% endif %}
-                </div>
-            </div>
-
-            <button type="submit" class="btn-primary-action">
-                <ion-icon name="download-outline"></ion-icon>
-                Gerar PDF
-            </button>
         </form>
     </div>
 </section>
 {% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const widthInput = document.getElementById('badge_width_mm');
+    const heightInput = document.getElementById('badge_height_mm');
+    const perPageInput = document.getElementById('badges_per_page');
+    const preview = document.getElementById('badge_layout_preview');
+    const miniGrid = document.getElementById('badge_mini_grid');
+    const previewSummary = document.getElementById('badge_preview_summary');
+    if (!widthInput || !heightInput || !perPageInput || !preview) return;
+
+    function parseMm(input) {
+        const value = String(input.value || '').replace(',', '.').trim();
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    }
+
+    function updatePreview() {
+        const width = parseMm(widthInput);
+        const height = parseMm(heightInput);
+        const requested = Number.parseInt(String(perPageInput.value || '1'), 10);
+        preview.className = 'presence-badge-layout-preview';
+        if (miniGrid) {
+            miniGrid.classList.remove('is-single');
+            miniGrid.innerHTML = '<span></span>';
+            miniGrid.style.gridTemplateColumns = '';
+            miniGrid.style.gridTemplateRows = '';
+        }
+
+        if (!width || !height || !requested) {
+            preview.textContent = '';
+            if (previewSummary) {
+                previewSummary.textContent = 'Ajuste as medidas para ver como os crachás entram na folha.';
+            }
+            return;
+        }
+
+        if (requested === 1) {
+            preview.textContent = 'Vai gerar um crachá por página, no tamanho exato informado.';
+            preview.classList.add('is-ok');
+            if (previewSummary) {
+                previewSummary.textContent = 'Um crachá por página, no tamanho final informado.';
+            }
+            if (miniGrid) {
+                miniGrid.classList.add('is-single');
+            }
+            return;
+        }
+
+        const pageMargin = 5;
+        const badgeGap = 2.5;
+        const columns = Math.floor(((210 - pageMargin * 2) + badgeGap) / (width + badgeGap));
+        const rows = Math.floor(((297 - pageMargin * 2) + badgeGap) / (height + badgeGap));
+        const capacity = Math.max(0, columns * rows);
+
+        if (!capacity) {
+            preview.textContent = 'Não cabe em uma folha A4 com essas medidas.';
+            preview.classList.add('is-error');
+            if (previewSummary) {
+                previewSummary.textContent = 'Essas medidas ultrapassam a área útil da folha A4.';
+            }
+            return;
+        }
+
+        if (requested > capacity) {
+            preview.textContent = `Não cabe: com margem de corte, essas medidas permitem no máximo ${capacity} por página A4 (${columns} por linha x ${rows} linha${rows === 1 ? '' : 's'}).`;
+            preview.classList.add('is-error');
+            if (previewSummary) {
+                previewSummary.textContent = `Reduza para ${capacity} por página ou diminua as medidas do crachá.`;
+            }
+            return;
+        }
+
+        preview.textContent = `Cabe sem sobrepor, com margem para corte: ${columns} por linha x ${rows} linha${rows === 1 ? '' : 's'}; você pediu ${requested} por página.`;
+        preview.classList.add('is-ok');
+        if (previewSummary) {
+            previewSummary.textContent = `${requested} crachá${requested === 1 ? '' : 's'} por página, ocupando ${columns} coluna${columns === 1 ? '' : 's'} x ${rows} linha${rows === 1 ? '' : 's'}.`;
+        }
+        if (miniGrid) {
+            miniGrid.classList.remove('is-single');
+            miniGrid.innerHTML = '';
+            miniGrid.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
+            miniGrid.style.gridTemplateRows = `repeat(${rows}, minmax(0, 1fr))`;
+            Array.from({ length: Math.min(requested, capacity) }).forEach(() => {
+                miniGrid.appendChild(document.createElement('span'));
+            });
+        }
+    }
+
+    [widthInput, heightInput, perPageInput].forEach((input) => {
+        input.addEventListener('input', updatePreview);
+        input.addEventListener('change', updatePreview);
+    });
+    updatePreview();
+});
+</script>
+{% endblock %}
+

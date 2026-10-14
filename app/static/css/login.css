@@ -64,7 +64,8 @@ body.login-page-body {
     padding: 20px;
     box-sizing: border-box;
     line-height: 1.6;
-    overflow: hidden; /* Para evitar barras de rolagem das particulas/animacoes */
+    overflow-x: hidden;
+    overflow-y: auto;
     position: relative; /* Para z-index do overlay e particulas */
 }
 
@@ -115,10 +116,10 @@ body.login-page-body {
     -webkit-backdrop-filter: blur(12px);
     border: 1px solid var(--form-border-glass);
     padding: 40px;
-    border-radius: 18px;
+    border-radius: 22px;
     box-shadow: var(--card-shadow);
     width: 100%;
-    max-width: 400px;
+    max-width: 420px;
     text-align: center;
     position: relative;
     z-index: 1; /* Acima do fundo e do overlay (se houver) */
@@ -177,7 +178,7 @@ body.login-page-body {
     color: var(--text-color-on-glass);
     background-color: rgba(255, 255, 255, 0.1);
     border: 1px solid var(--form-border-glass);
-    border-radius: 8px;
+    border-radius: 12px;
     box-sizing: border-box;
     transition: border-color 0.22s ease, box-shadow 0.22s ease, background-color 0.22s ease, transform 0.22s ease;
 }
@@ -233,7 +234,7 @@ body.login-page-body {
     justify-content: center;
     transform: translateY(-50%);
     border: 1px solid transparent;
-    border-radius: 999px;
+    border-radius: 12px;
     background: transparent;
     color: rgba(240, 248, 255, 0.78);
     cursor: pointer;
@@ -285,7 +286,7 @@ body.login-page-body {
     background: var(--login-btn-bg);
     color: var(--login-btn-text);
     border: 1px solid rgba(126, 176, 233, 0.65);
-    border-radius: 8px;
+    border-radius: 12px;
     cursor: pointer;
     transition: background-color 0.2s ease, transform 0.14s ease, box-shadow 0.2s ease, border-color 0.2s ease;
     text-transform: uppercase;
@@ -385,6 +386,15 @@ body.login-page-body {
 /* SECAO: responsividade da tela de login em telas pequenas. */
 
 @media (max-width: 520px) {
+    body.login-page-body {
+        align-items: flex-start;
+        padding: 24px 14px;
+    }
+
+    .login-container {
+        padding: 28px 22px;
+    }
+
     .titulo-com-logo {
         padding-left: 38px;
         font-size: 1.8em;
@@ -396,6 +406,18 @@ body.login-page-body {
         top: -12%;
         left: -2%;
         transform: translateY(-8px);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .login-container,
+    .form-error {
+        animation: none;
+    }
+
+    .login-container {
+        opacity: 1;
+        transform: none;
     }
 }
 

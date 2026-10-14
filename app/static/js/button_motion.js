@@ -5,6 +5,7 @@
   // Prepara um botao/link para a animacao, criando spans de texto e icone.
   function enhance(button) {
     if (button.classList.contains('button-motion')) return;
+    if (button.closest('.action-stack, .action-stack-compact, .inline-action-form, .presence-event-delete-form')) return;
     let icon = button.querySelector('ion-icon, svg, i[class*="icon"], i[class*="fa-"]');
     if (!button.textContent.trim()) return;
 

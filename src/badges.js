@@ -1,6 +1,10 @@
 const PDFDocument = require("pdfkit");
 
-const CM_TO_PT = 72 / 2.54;
+const MM_TO_PT = 72 / 25.4;
+const A4_WIDTH_MM = 210;
+const A4_HEIGHT_MM = 297;
+const SHEET_MARGIN_MM = 5;
+const BADGE_GAP_MM = 2.5;
 
 const CODE39 = Object.freeze({
   "0": "nnnwwnwnn",
@@ -49,8 +53,8 @@ const CODE39 = Object.freeze({
   "*": "nwnnwnwnn",
 });
 
-function cmToPt(value) {
-  return Number(value) * CM_TO_PT;
+function mmToPt(value) {
+  return Number(value) * MM_TO_PT;
 }
 
 function parsePositiveNumber(value) {
@@ -69,17 +73,19 @@ function normalizeBadgeForm(body = {}) {
   const firstCodeText = String(body.first_code || "").trim();
   const lastCodeText = String(body.last_code || "").trim();
   const totalText = String(body.total_badges || "").trim();
+  const badgesPerPageText = String(body.badges_per_page || "1").trim();
 
   return {
     firstCode: /^\d+$/.test(firstCodeText) ? Number(firstCodeText) : null,
     lastCode: /^\d+$/.test(lastCodeText) ? Number(lastCodeText) : null,
     totalBadges: /^\d+$/.test(totalText) ? Number(totalText) : null,
-    badgeWidthCm: parsePositiveNumber(body.badge_width_cm),
-    badgeHeightCm: parsePositiveNumber(body.badge_height_cm),
-    barcodeWidthCm: parsePositiveNumber(body.barcode_width_cm),
-    barcodeHeightCm: parsePositiveNumber(body.barcode_height_cm),
-    barcodeXCm: parseNonNegativeNumber(body.barcode_x_cm),
-    barcodeYCm: parseNonNegativeNumber(body.barcode_y_cm),
+    badgesPerPage: /^\d+$/.test(badgesPerPageText) ? Number(badgesPerPageText) : null,
+    badgeWidthMm: parsePositiveNumber(body.badge_width_mm ?? body.badge_width_cm),
+    badgeHeightMm: parsePositiveNumber(body.badge_height_mm ?? body.badge_height_cm),
+    barcodeWidthMm: parsePositiveNumber(body.barcode_width_mm ?? body.barcode_width_cm),
+    barcodeHeightMm: parsePositiveNumber(body.barcode_height_mm ?? body.barcode_height_cm),
+    barcodeXMm: parseNonNegativeNumber(body.barcode_x_mm ?? body.barcode_x_cm),
+    barcodeYMm: parseNonNegativeNumber(body.barcode_y_mm ?? body.barcode_y_cm),
   };
 }
 
@@ -100,38 +106,85 @@ function validateBadgeForm(formData, file) {
   if (formData.totalBadges && formData.totalBadges > 1000) {
     errors.totalBadges = ["Gere no maximo 1000 crachas por vez."];
   }
+  if (!formData.badgesPerPage) {
+    errors.badgesPerPage = ["Informe quantos crachas devem ir em cada pagina."];
+  } else if (formData.badgesPerPage > 20) {
+    errors.badgesPerPage = ["Use no maximo 20 crachas por pagina."];
+  }
   [
-    ["badgeWidthCm", "Largura do cracha"],
-    ["badgeHeightCm", "Altura do cracha"],
-    ["barcodeWidthCm", "Largura do codigo"],
-    ["barcodeHeightCm", "Altura do codigo"],
+    ["badgeWidthMm", "Largura do cracha"],
+    ["badgeHeightMm", "Altura do cracha"],
+    ["barcodeWidthMm", "Largura do codigo"],
+    ["barcodeHeightMm", "Altura do codigo"],
   ].forEach(([key, label]) => {
     if (!formData[key]) {
       errors[key] = [`${label} deve ser maior que zero.`];
     }
   });
-  if (formData.barcodeXCm === null) {
-    errors.barcodeXCm = ["X deve ser zero ou maior."];
+  if (formData.barcodeXMm === null) {
+    errors.barcodeXMm = ["X deve ser zero ou maior."];
   }
-  if (formData.barcodeYCm === null) {
-    errors.barcodeYCm = ["Y deve ser zero ou maior."];
+  if (formData.barcodeYMm === null) {
+    errors.barcodeYMm = ["Y deve ser zero ou maior."];
   }
   if (
-    formData.badgeWidthCm &&
-    formData.badgeHeightCm &&
-    formData.barcodeWidthCm &&
-    formData.barcodeHeightCm &&
-    formData.barcodeXCm !== null &&
-    formData.barcodeYCm !== null
+    formData.badgeWidthMm &&
+    formData.badgeHeightMm &&
+    formData.barcodeWidthMm &&
+    formData.barcodeHeightMm &&
+    formData.barcodeXMm !== null &&
+    formData.barcodeYMm !== null
   ) {
-    if (formData.barcodeXCm + formData.barcodeWidthCm > formData.badgeWidthCm) {
-      errors.barcodeXCm = ["O codigo de barras passa da largura do cracha."];
+    if (formData.barcodeXMm + formData.barcodeWidthMm > formData.badgeWidthMm) {
+      errors.barcodeXMm = ["O codigo de barras passa da largura do cracha."];
     }
-    if (formData.barcodeYCm + formData.barcodeHeightCm > formData.badgeHeightCm) {
-      errors.barcodeYCm = ["O codigo de barras passa da altura do cracha."];
+    if (formData.barcodeYMm + formData.barcodeHeightMm > formData.badgeHeightMm) {
+      errors.barcodeYMm = ["O codigo de barras passa da altura do cracha."];
+    }
+    if (formData.badgesPerPage > 1) {
+      const layout = calculateBadgeLayout(formData);
+      if (!layout.fitsOne) {
+        errors.badgeWidthMm = ["Este cracha nao cabe em uma pagina A4 com essas medidas."];
+      } else if (formData.badgesPerPage > layout.capacity) {
+        errors.badgesPerPage = [
+          `Com ${formData.badgeWidthMm} x ${formData.badgeHeightMm} mm, cabem no maximo ${layout.capacity} cracha(s) por pagina A4 sem sobrepor.`,
+        ];
+      }
     }
   }
   return errors;
+}
+
+function calculateBadgeLayout(formData) {
+  const badgesPerPage = Math.max(1, Number(formData.badgesPerPage || 1));
+  const useSheetPage = badgesPerPage > 1;
+  const pageWidthMm = useSheetPage ? A4_WIDTH_MM : formData.badgeWidthMm;
+  const pageHeightMm = useSheetPage ? A4_HEIGHT_MM : formData.badgeHeightMm;
+  const marginMm = useSheetPage ? SHEET_MARGIN_MM : 0;
+  const gapMm = useSheetPage ? BADGE_GAP_MM : 0;
+  const usableWidthMm = pageWidthMm - marginMm * 2;
+  const usableHeightMm = pageHeightMm - marginMm * 2;
+  const columns = Math.max(0, Math.floor((usableWidthMm + gapMm) / (formData.badgeWidthMm + gapMm)));
+  const rows = Math.max(0, Math.floor((usableHeightMm + gapMm) / (formData.badgeHeightMm + gapMm)));
+  const capacity = Math.max(0, columns * rows);
+  const usablePerPage = useSheetPage ? Math.min(badgesPerPage, capacity) : 1;
+
+  return {
+    useSheetPage,
+    pageWidthMm,
+    pageHeightMm,
+    pageWidth: mmToPt(pageWidthMm),
+    pageHeight: mmToPt(pageHeightMm),
+    badgeWidth: mmToPt(formData.badgeWidthMm),
+    badgeHeight: mmToPt(formData.badgeHeightMm),
+    margin: mmToPt(marginMm),
+    gap: mmToPt(gapMm),
+    columns,
+    rows,
+    capacity,
+    usablePerPage,
+    fitsOne: capacity >= 1,
+  };
 }
 
 function buildCodeList({ firstCode, lastCode, totalBadges }) {
@@ -194,8 +247,7 @@ function drawCode39(doc, text, x, y, width, height) {
 function generateBadgesPdf({ baseImageBuffer, formData }) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    const pageWidth = cmToPt(formData.badgeWidthCm);
-    const pageHeight = cmToPt(formData.badgeHeightCm);
+    const layout = calculateBadgeLayout(formData);
     const codes = buildCodeList(formData);
     const doc = new PDFDocument({
       autoFirstPage: false,
@@ -209,16 +261,26 @@ function generateBadgesPdf({ baseImageBuffer, formData }) {
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
 
-    codes.forEach((code) => {
-      doc.addPage({ size: [pageWidth, pageHeight], margin: 0 });
-      doc.image(baseImageBuffer, 0, 0, { width: pageWidth, height: pageHeight });
+    codes.forEach((code, index) => {
+      const pageIndex = Math.floor(index / layout.usablePerPage);
+      const indexOnPage = index % layout.usablePerPage;
+      if (indexOnPage === 0) {
+        doc.addPage({ size: [layout.pageWidth, layout.pageHeight], margin: 0 });
+      }
+
+      const column = indexOnPage % layout.columns;
+      const row = Math.floor(indexOnPage / layout.columns);
+      const x = layout.margin + column * (layout.badgeWidth + layout.gap);
+      const y = layout.margin + row * (layout.badgeHeight + layout.gap);
+
+      doc.image(baseImageBuffer, x, y, { width: layout.badgeWidth, height: layout.badgeHeight });
       drawCode39(
         doc,
         code,
-        cmToPt(formData.barcodeXCm),
-        cmToPt(formData.barcodeYCm),
-        cmToPt(formData.barcodeWidthCm),
-        cmToPt(formData.barcodeHeightCm),
+        x + mmToPt(formData.barcodeXMm),
+        y + mmToPt(formData.barcodeYMm),
+        mmToPt(formData.barcodeWidthMm),
+        mmToPt(formData.barcodeHeightMm),
       );
     });
 

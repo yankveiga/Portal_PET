@@ -52,7 +52,7 @@
     <div class="container">
         {# SECAO: navegacao lateral com atalhos por modulo e controle de perfil. #}
 
-        <div class="navigation">
+        <div class="navigation" id="portal-navigation">
             <ul>
                 <li class="nav-brand">
                     <div class="nav-brand-inner" role="presentation">
@@ -147,7 +147,14 @@
 
         <div class="main">
             <div class="topbar">
-                <div class="toggle">
+                <div
+                    class="toggle"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Abrir menu de navegação"
+                    aria-controls="portal-navigation"
+                    aria-expanded="false"
+                >
                     <ion-icon name="menu-outline"></ion-icon>
                 </div>
 

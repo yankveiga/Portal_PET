@@ -28,6 +28,7 @@ instance/
 .env
 *.env* # Para cobrir .env.development, .env.production etc.
 !.env.example # Frequentemente se versiona um exemplo
+.skills-lock.json
 
 # Logs e arquivos de upload (se não quiser versionar logos)
 *.log

@@ -98,6 +98,8 @@
                 <input
                     id="username"
                     name="username"
+                    type="text"
+                    autocomplete="username"
                     class="form-control"
                     placeholder="Seu usuário"
                     value="{{ formData.username or '' }}"
@@ -118,6 +120,7 @@
                     id="password"
                     name="password"
                     type="password"
+                    autocomplete="current-password"
                     class="form-control"
                     placeholder="Sua senha"
                 >
