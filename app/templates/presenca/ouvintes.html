@@ -9,12 +9,21 @@
             <h1>Ouvintes</h1>
             <p class="lead">Novos ouvintes são vinculados automaticamente a todos os eventos cadastrados.</p>
         </div>
-        {% if selectedEvent %}
-        <a class="btn-secondary-action" href="{{ urlFor('presenca_export_csv', { id: selectedEvent.id }) }}" style="text-decoration:none;white-space:nowrap">
-            <ion-icon name="download-outline"></ion-icon>
-            Exportar CSV
-        </a>
-        {% endif %}
+        <div class="presence-export">
+            <div class="presence-export-actions">
+                <a class="btn-secondary-action" href="{{ urlFor('presenca_export_geral_csv') }}" aria-describedby="presence-export-hint">
+                    <ion-icon name="download-outline" aria-hidden="true"></ion-icon>
+                    CSV geral de presenças
+                </a>
+                {% if selectedEvent %}
+                <a class="btn-secondary-action" href="{{ urlFor('presenca_export_csv', { id: selectedEvent.id }) }}">
+                    <ion-icon name="download-outline" aria-hidden="true"></ion-icon>
+                    CSV desta atividade
+                </a>
+                {% endif %}
+            </div>
+            <p class="form-hint" id="presence-export-hint">O CSV geral inclui todos os ouvintes, presença por evento e percentual sobre todos os eventos cadastrados, inclusive inativos.</p>
+        </div>
     </header>
 
     <section class="presence-flow">

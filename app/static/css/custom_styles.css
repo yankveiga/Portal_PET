@@ -773,6 +773,33 @@ body.theme-dark .global-loading-card {
   border-color: rgba(109, 40, 217, 0.74);
 }
 
+.presence-export {
+  flex: 0 1 500px;
+  min-width: 0;
+}
+
+.presence-export-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.presence-export-actions a {
+  text-decoration: none;
+  text-align: center;
+}
+
+.presence-export .form-hint {
+  margin-top: 10px;
+  line-height: 1.6;
+}
+
+@media (max-width: 720px) {
+  .presence-export { flex-basis: auto; }
+  .presence-export-actions { flex-direction: column; }
+}
+
 .presence-actions {
   display: flex;
   align-items: center;

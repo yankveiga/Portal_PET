@@ -121,6 +121,7 @@ async function main() {
     const html = await login.text();
     const csrf = html.match(/name="csrf_token"[^>]*value="([^"]+)"/)?.[1];
     assert.ok(csrf, "Token CSRF ausente");
+    assert.equal((await request("/presenca/exportar-geral.csv")).status, 302, "CSV geral exige autenticação");
     const loggedIn = await request("/login", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ username: "isolated_admin", password: "isolated-password", csrf_token: csrf }) });
     assert.equal(loggedIn.status, 302);
     for (const path of ["/home", "/members", "/projects", "/planner", "/relatorios", "/almoxarifado", "/almoxarifado?tab=manage", "/almoxarifado/api/dashboard", "/manutencao-usuarios", "/mensagens", "/presenca/eventos", "/presenca/ouvintes", "/espacos-escrita"]) {
@@ -149,6 +150,19 @@ async function main() {
     assert.equal((await postPresence("/presenca/ouvintes/vincular-todos")).status, 302);
     assert.equal((await database.getEventById(newestEvent.id)).attendee_count, 3);
     assert.equal((await database.getEventById(event.id)).present_count, 1);
+    const generalCsv = await request("/presenca/exportar-geral.csv");
+    assert.equal(generalCsv.status, 200);
+    assert.ok(generalCsv.headers.get("content-type").includes("text/csv"));
+    assert.ok(generalCsv.headers.get("content-disposition").includes("presenca_geral.csv"));
+    assert.equal(generalCsv.headers.get("cache-control"), "no-store");
+    const generalCsvText = await generalCsv.text();
+    assert.ok(generalCsvText.includes(`Outro evento isolado [ID ${otherEvent.id}]`), "Inclui eventos inativos");
+    assert.ok(generalCsvText.includes("Presente"));
+    assert.ok(generalCsvText.includes('1,4,"25,00%"'), "Percentual usa todos os eventos");
+    assert.equal(generalCsvText.split("\r\n").length, 4, "Inclui todos os três ouvintes");
+    const listenersHtml = await (await request("/presenca/ouvintes")).text();
+    assert.ok(listenersHtml.includes('href="/presenca/exportar-geral.csv"'));
+    assert.ok(listenersHtml.includes(`/presenca/eventos/${event.id}/exportar.csv`) || listenersHtml.includes("CSV desta atividade"));
     await postPresence("/presenca/ouvintes/excluir-todos", { confirm_delete_all: "1" }, "invalid-token");
     assert.equal((await database.listAttendees()).length, 3);
     await postPresence("/presenca/ouvintes/excluir-todos");
@@ -158,6 +172,9 @@ async function main() {
     assert.equal((await database.listEventAttendees(event.id)).length, 0);
     assert.equal((await database.getEventById(event.id)).present_count, 0);
     assert.equal((await database.listEvents()).length, 4);
+    const emptyCsv = await request("/presenca/exportar-geral.csv");
+    assert.equal(emptyCsv.status, 200);
+    assert.equal((await emptyCsv.text()).split("\r\n").length, 1, "Sem ouvintes exporta apenas cabeçalho");
     console.log("Transacoes, event loop, paginas autenticadas e acoes em lote de ouvintes: OK");
   } finally {
     if (server) await new Promise(resolve=>server.close(resolve));

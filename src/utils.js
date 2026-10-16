@@ -41,6 +41,7 @@ const ROUTES = Object.freeze({
   presenca_import_preview: "/presenca/ouvintes/importar/preview",
   presenca_import_confirm: "/presenca/ouvintes/importar/confirmar",
   presenca_export_csv: "/presenca/eventos/:id/exportar.csv",
+  presenca_export_geral_csv: "/presenca/exportar-geral.csv",
   relatorios: "/relatorios",
   create_report: "/relatorios/create",
   edit_report: "/relatorios/edit/:id",

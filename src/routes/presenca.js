@@ -2,6 +2,7 @@ const asyncArray = require("../asyncArray");
 ﻿const fs = require("node:fs");
 const multer = require("multer");
 const ExcelJS = require("exceljs");
+const { buildPresenceCsv } = require("../services/presenceExportService");
 const {
   generateBadgesPdf,
   normalizeBadgeForm,
@@ -702,6 +703,22 @@ function registerPresenceRoutes(ctx) {
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="presenca_evento_${event.id}.csv"`);
     return res.send(`\uFEFF${lines.join("\r\n")}`);
+  });
+
+  // Exporta todos os ouvintes e eventos, independentemente dos filtros da tela.
+  app.get("/presenca/exportar-geral.csv", requireAuth, async (req, res) => {
+    try {
+      const events = await database.listPresenceMatrixEvents();
+      const rows = await database.listPresenceMatrixRows();
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", 'attachment; filename="presenca_geral.csv"');
+      res.setHeader("Cache-Control", "no-store");
+      return res.send(buildPresenceCsv({ events, rows }));
+    } catch (error) {
+      logError(req, "Erro ao exportar CSV geral de presença:", error);
+      req.flash("danger", "Não foi possível exportar o CSV geral. Tente novamente.");
+      return res.redirect(urlFor("presenca_ouvintes"));
+    }
   });
 
   // Exporta a matriz geral de presenca em XLSX, com uma coluna por atividade.
