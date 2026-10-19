@@ -6,14 +6,14 @@
 
     <header class="page-header">
         <h1>Check-in</h1>
-        <p class="lead">Selecione a atividade e registre a presença pelo código do crachá.</p>
+        <p class="lead">Selecione a atividade e registre a presença pelo código do crachá ou CPF.</p>
     </header>
 
     <section class="content-panel presence-checkin-panel">
         <div class="panel-header">
             <div>
                 <h2>Registro rápido</h2>
-                <p>Escaneie ou digite o código do crachá. O campo volta ao foco após cada bip.</p>
+                <p>Escaneie ou digite o código do crachá ou o CPF. O campo volta ao foco após cada bip.</p>
             </div>
             {% if selectedEvent %}
             <span class="page-badge">
@@ -42,13 +42,13 @@
             <form id="presenca-form" class="presence-scan-form" method="post" action="{{ urlFor('registrar_presenca') }}" data-no-global-loading="true">
                 <input type="hidden" name="csrf_token" value="{{ csrfToken }}">
                 <input type="hidden" name="event_id" value="{{ selectedEvent.id }}">
-                <label class="sr-only" for="badge_code">Código do crachá</label>
+                <label class="sr-only" for="badge_code">Código do crachá ou CPF</label>
                 <input
                     type="text"
                     id="badge_code"
                     name="badge_code"
                     class="form-control presence-scan-input"
-                    placeholder="Escaneie ou digite o código do crachá..."
+                    placeholder="Escaneie ou digite o código do crachá ou CPF..."
                     required
                     autofocus
                     autocomplete="off"
@@ -168,7 +168,7 @@
                 throw new Error(result.error || result.message || 'Erro ao registrar presença.');
             }
             var kind = result.success ? 'success' : 'error';
-            var msg = result.message || (result.success ? 'Presença registrada.' : 'Crachá não encontrado.');
+            var msg = result.message || (result.success ? 'Presença registrada.' : 'Crachá ou CPF não encontrado.');
             renderResultado(msg, kind);
             addFeedEntry(msg, kind, code);
         } catch (error) {

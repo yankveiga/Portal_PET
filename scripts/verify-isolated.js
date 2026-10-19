@@ -83,12 +83,14 @@ async function main() {
     const event = await database.createEvent({ name: "Evento isolado" });
     const otherEvent = await database.createEvent({ name: "Outro evento isolado" });
     await database.updateEvent({ id: otherEvent.id, name: otherEvent.name, isActive: false });
-    const attendee = await database.createAttendee({ name: "Ouvinte isolado", badgeCode: "isolated-badge" });
+    const attendee = await database.createAttendee({ name: "Ouvinte isolado", cpf: "123.456.789-09", badgeCode: "isolated-badge" });
     assert.equal((await database.listAttendees()).find(row => row.id === attendee.id).event_count, 2);
     assert.equal((await database.getEventById(otherEvent.id)).present_count, 0);
     await database.attachAttendeeToEvent({ eventId: event.id, attendeeId: attendee.id });
     assert.equal((await database.registerEventAttendance({ eventId: event.id, badgeCode: "isolated-badge", checkedInByUserId: adminUser.id })).success, true);
     assert.equal((await database.registerEventAttendance({ eventId: event.id, badgeCode: "isolated-badge", checkedInByUserId: adminUser.id })).success, false);
+    assert.equal((await database.registerEventAttendance({ eventId: otherEvent.id, badgeCode: "12345678909", checkedInByUserId: adminUser.id })).success, true);
+    assert.equal((await database.registerEventAttendance({ eventId: otherEvent.id, badgeCode: "123.456.789-09", checkedInByUserId: adminUser.id })).success, false);
     const laterEvent = await database.createEvent({ name: "Evento posterior" });
     await database.attachAttendeesToAllEvents();
     await database.attachAttendeesToAllEvents();

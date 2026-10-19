@@ -6825,17 +6825,20 @@ async function deleteEventAttendee(id) {
 
 async function registerEventAttendance({ eventId, badgeCode, checkedInByUserId, method = "scan" }) {
   return withTransaction(async () => {
-  const normalizedBadge = String(badgeCode || "").trim();
+  const identifier = String(badgeCode || "").trim();
+  const normalizedCpf = identifier.replace(/\D/g, "");
+  const hasCpfFormat = normalizedCpf.length === 11;
   if (!eventId) {
     return { success: false, message: "Selecione um evento." };
   }
-  if (!normalizedBadge) {
-    return { success: false, message: "Informe o código do crachá." };
+  if (!identifier) {
+    return { success: false, message: "Informe o código do crachá ou o CPF." };
   }
   const event = (await getEventById(eventId));
   if (!event) {
     return { success: false, message: "Evento não encontrado." };
   }
+  // O código do crachá tem prioridade quando um valor poderia coincidir com um CPF.
   let attendee = (await getDb()
     .prepare(
       `
@@ -6846,11 +6849,46 @@ async function registerEventAttendance({ eventId, badgeCode, checkedInByUserId, 
       LIMIT 1
     `,
     )
-    .get(eventId, normalizedBadge));
+    .get(eventId, identifier));
+  if (!attendee && hasCpfFormat) {
+    const cpfMatches = (await getDb()
+      .prepare(
+        `
+        SELECT ea.*
+        FROM event_attendee ea
+        WHERE ea.event_id = ?
+          AND REGEXP_REPLACE(COALESCE(ea.cpf, ''), '[^0-9]', '', 'g') = ?
+        ORDER BY ea.id
+        LIMIT 2
+      `,
+      )
+      .all(eventId, normalizedCpf));
+    if (cpfMatches.length > 1) {
+      return { success: false, message: "Há mais de um ouvinte com este CPF. Confira o cadastro." };
+    }
+    attendee = cpfMatches[0] || null;
+  }
   if (!attendee) {
-    const generalAttendee = (await getAttendeeByBadgeCode(normalizedBadge));
+    let generalAttendee = (await getAttendeeByBadgeCode(identifier));
+    if (!generalAttendee && hasCpfFormat) {
+      const cpfMatches = (await getDb()
+        .prepare(
+          `
+          SELECT *
+          FROM attendee
+          WHERE REGEXP_REPLACE(COALESCE(cpf, ''), '[^0-9]', '', 'g') = ?
+          ORDER BY id
+          LIMIT 2
+        `,
+        )
+        .all(normalizedCpf));
+      if (cpfMatches.length > 1) {
+        return { success: false, message: "Há mais de um ouvinte com este CPF. Confira o cadastro." };
+      }
+      generalAttendee = mapAttendee(cpfMatches[0]);
+    }
     if (!generalAttendee) {
-      return { success: false, message: "Crachá não encontrado na lista de ouvintes." };
+      return { success: false, message: "Crachá ou CPF não encontrado na lista de ouvintes." };
     }
     attendee = (await attachAttendeeToEvent({ eventId, attendeeId: generalAttendee.id }));
   }
