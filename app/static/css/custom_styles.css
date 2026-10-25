@@ -3189,6 +3189,35 @@ body.theme-dark.section-projects .project-logo-preview img {
 }
 
 /* SECAO: layout e componentes da tela de relatorios semanais. */
+.report-draft-state {
+    display: block;
+    margin-top: 0.45rem;
+    color: var(--text-muted, #5d6c68);
+    font-size: 0.82rem;
+}
+
+.report-draft-reload {
+    margin-top: 0.45rem;
+    border: 0;
+    background: transparent;
+    color: #0b6bcb;
+    cursor: pointer;
+    font: inherit;
+    padding: 0;
+    text-decoration: underline;
+}
+
+.report-fortnight-submitted {
+    border-left: 3px solid #198754;
+    background: #edf8f1;
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+}
+
+.report-fortnight-submitted p {
+    white-space: pre-wrap;
+    margin: 0.6rem 0;
+}
 
 .report-layout {
   display: grid;
@@ -3882,7 +3911,9 @@ body.theme-dark.section-reports .report-tabs-nav {
 
 /* Mantem o botao de advertencia alinhado a direita quando ha espaco. */
 .member-warning-actions {
-  margin-left: auto;
+  display: inline-flex;
+  gap: 0.5rem;
+  align-items: center;
 }
 
 /* Botao que abre a janela de nova advertencia. */
@@ -3896,13 +3927,184 @@ body.theme-dark.section-reports .report-tabs-nav {
 
 /* Janela pequena de advertencias reaproveita o popover de criacao. */
 .member-warning-popover {
-  max-width: min(560px, calc(100vw - 32px));
+  width: min(480px, calc(100vw - 32px));
+  max-width: min(480px, calc(100vw - 32px));
 }
 
-/* Formulario para iniciar o periodo de acompanhamento de 365 dias. */
-.member-warning-restriction-form {
-  padding: 0 18px 16px;
-  margin-top: -4px;
+.member-warning-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.member-warning-cycle-action {
+  margin: 0;
+}
+
+.member-warning-cycle-button,
+.member-special-cycle-submit {
+  min-height: 36px;
+  border: 1px solid rgba(180, 83, 9, 0.32);
+  border-radius: 10px;
+  padding: 0.42rem 0.72rem;
+  background: #fffaf0;
+  color: #8a4b08;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.member-warning-cycle-button:hover,
+.member-special-cycle-submit:hover {
+  background: #fff1d6;
+  border-color: rgba(180, 83, 9, 0.54);
+}
+
+.member-special-cycle-control {
+  position: relative;
+}
+
+.member-special-cycle-control > summary {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(15, 118, 110, 0.28);
+  border-radius: 10px;
+  padding: 0.42rem 0.72rem;
+  color: #17665f;
+  background: #f4fbfa;
+  font-size: 0.82rem;
+  font-weight: 750;
+  cursor: pointer;
+  list-style: none;
+}
+
+.member-special-cycle-control > summary::-webkit-details-marker {
+  display: none;
+}
+
+.member-special-cycle-control > summary::after {
+  content: "+";
+  margin-left: 0.45rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.member-special-cycle-control[open] > summary::after {
+  content: "−";
+}
+
+.member-special-cycle-control > summary:hover {
+  background: #e8f7f4;
+  border-color: rgba(15, 118, 110, 0.48);
+}
+
+.member-special-cycle-status {
+  color: #6f1d1b;
+  font-weight: 700;
+}
+
+.member-special-cycle-form {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.5rem);
+  z-index: 60;
+  display: grid;
+  gap: 0.45rem;
+  width: 300px;
+  padding: 0.85rem;
+  border: 1px solid rgba(15, 118, 110, 0.2);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 14px 30px rgba(15, 48, 45, 0.14);
+}
+
+.member-special-cycle-form form {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.member-special-cycle-end-form {
+  margin-top: 0.25rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid rgba(185, 28, 28, 0.16);
+}
+
+.member-special-cycle-end {
+  min-height: 34px;
+  border: 1px solid rgba(185, 28, 28, 0.3);
+  border-radius: 9px;
+  padding: 0.38rem 0.66rem;
+  background: #fff7f7;
+  color: #a12727;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.member-special-cycle-end:hover {
+  background: #ffebeb;
+  border-color: rgba(185, 28, 28, 0.52);
+}
+
+.member-special-cycle-form small {
+  color: var(--text-muted, #5d6c68);
+  line-height: 1.35;
+}
+
+.member-special-cycle-form .form-control {
+  min-height: 38px;
+}
+
+.member-warning-popover .planner-create-section {
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.member-warning-popover .member-warning-form {
+  padding: 1rem;
+}
+
+.member-warning-popover .form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.85rem;
+}
+
+.member-warning-popover .btn-submit,
+.member-warning-popover .btn-cancel {
+  min-height: 38px;
+}
+
+.member-warning-cycle-button:focus-visible,
+.member-special-cycle-control > summary:focus-visible,
+.member-special-cycle-submit:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 3px;
+}
+
+.member-special-cycle-end:focus-visible {
+  outline: 2px solid #b91c1c;
+  outline-offset: 3px;
+}
+
+@media (max-width: 720px) {
+  .member-warning-controls {
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+
+  .member-special-cycle-form {
+    right: auto;
+    left: 0;
+  }
 }
 
 /* Lista de projetos vinculados ao membro escolhido. */
@@ -5577,6 +5779,66 @@ body.theme-dark.section-reports .planner-create-popover textarea {
   background: rgba(22, 28, 50, 0.94);
   color: #e8eeff;
   border-color: rgba(114, 128, 168, 0.42);
+}
+
+body.theme-dark.section-reports .member-special-cycle-status {
+  color: #f6c98a;
+}
+
+body.theme-dark.section-reports .member-warning-cycle-button,
+body.theme-dark.section-reports .member-special-cycle-submit {
+  border-color: rgba(246, 178, 73, 0.45);
+  background: rgba(104, 66, 15, 0.38);
+  color: #ffe2aa;
+}
+
+body.theme-dark.section-reports .member-warning-cycle-button:hover,
+body.theme-dark.section-reports .member-special-cycle-submit:hover {
+  border-color: rgba(255, 205, 111, 0.68);
+  background: rgba(132, 84, 17, 0.54);
+}
+
+body.theme-dark.section-reports .member-special-cycle-control > summary {
+  border-color: rgba(94, 211, 192, 0.42);
+  background: rgba(15, 92, 83, 0.3);
+  color: #a9f3e5;
+}
+
+body.theme-dark.section-reports .member-special-cycle-control > summary:hover {
+  border-color: rgba(122, 240, 220, 0.64);
+  background: rgba(18, 115, 102, 0.42);
+}
+
+body.theme-dark.section-reports .member-special-cycle-form {
+  border-color: rgba(94, 211, 192, 0.32);
+  background: rgba(14, 31, 47, 0.98);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.48);
+}
+
+body.theme-dark.section-reports .member-special-cycle-form .form-label,
+body.theme-dark.section-reports .member-special-cycle-form small {
+  color: #bfd6de;
+}
+
+body.theme-dark.section-reports .member-special-cycle-form .form-control {
+  border-color: rgba(108, 157, 181, 0.46);
+  background: rgba(7, 20, 34, 0.96);
+  color: #ecf7fa;
+  color-scheme: dark;
+}
+
+body.theme-dark.section-reports .member-special-cycle-end-form {
+  border-color: rgba(252, 165, 165, 0.26);
+}
+
+body.theme-dark.section-reports .member-special-cycle-end {
+  border-color: rgba(252, 165, 165, 0.42);
+  background: rgba(127, 29, 29, 0.36);
+  color: #fecaca;
+}
+
+body.theme-dark.section-reports .member-special-cycle-end:hover {
+  background: rgba(153, 27, 27, 0.5);
 }
 
 body.theme-dark.section-reports .report-goal-member-checks {

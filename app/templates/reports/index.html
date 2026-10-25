@@ -127,9 +127,13 @@
  {% elif selectedMember.restriction_started_at %}
  <p>Periodo de acompanhamento/restricao encerrado.</p>
  {% endif %}
+ {% if selectedMember.special_cycle_is_active %}
+ <p class="member-special-cycle-status">Ciclo especial ativo desde {{ selectedMember.special_cycle_started_at | formatDate }} até {{ selectedMember.special_cycle_ends_at | formatDate }} · {{ selectedMember.special_cycle_days_remaining }} dias restantes.</p>
+ {% endif %}
  </div>
  {% if canManageWarnings %}
  {# Popover para registrar nova advertencia e abrir historico atual. #}
+ <div class="member-warning-controls">
  <div class="member-warning-actions planner-create-compact" id="member_warning_box">
  <button type="button" class="planner-create-backdrop" id="member_warning_backdrop" hidden aria-label="Fechar advertencias"></button>
  <button type="button" class="planner-create-button member-warning-open" id="member_warning_toggle" aria-expanded="false" aria-controls="member_warning_popover"><ion-icon name="add-outline" aria-hidden="true"></ion-icon>Nova advertência</button>
@@ -143,12 +147,11 @@
  <form action="/relatorios/warnings/{{ selectedMember.id }}/update#report-goals-panel" method="post" class="member-warning-form">
  <input type="hidden" name="csrf_token" value="{{ csrfToken }}">
  <section class="planner-create-section planner-create-section-essential">
- <h4>Essenciais</h4>
  <input type="hidden" name="warning_action" value="add">
  <div class="planner-create-grid">
  <div class="form-group form-group-full">
  <label class="form-label" for="member_warning_note">Motivo/observacao</label>
- <textarea id="member_warning_note" name="warning_note" rows="3" maxlength="300" class="form-control" placeholder="Descreva brevemente o motivo da alteracao."></textarea>
+ <textarea id="member_warning_note" name="warning_note" rows="4" maxlength="300" autocomplete="off" class="form-control" placeholder="Descreva brevemente o motivo da alteração…"></textarea>
  </div>
  </div>
  </section>
@@ -157,13 +160,43 @@
  <button type="button" class="btn-cancel" id="member_warning_close">Fechar</button>
  </div>
  </form>
+ </div>
+ </div>
  {% if selectedMember.warning_count == 3 and not selectedMember.restriction_is_active %}
- <form action="/relatorios/warnings/{{ selectedMember.id }}/restriction/start#report-goals-panel" method="post" class="member-warning-restriction-form">
+ <form action="/relatorios/warnings/{{ selectedMember.id }}/restriction/start#report-goals-panel" method="post" class="member-warning-cycle-action">
  <input type="hidden" name="csrf_token" value="{{ csrfToken }}">
- <button type="submit" class="btn-submit btn-submit-small">Iniciar 365 dias</button>
+ <button type="submit" class="member-warning-cycle-button">Iniciar acompanhamento de 365 dias</button>
  </form>
  {% endif %}
+ {% if not selectedMember.special_cycle_is_active %}
+ <details class="member-special-cycle-control">
+ <summary>Ciclo especial de advertências</summary>
+ <form action="/relatorios/warnings/{{ selectedMember.id }}/special-cycle/start#report-goals-panel" method="post" class="member-special-cycle-form">
+ <input type="hidden" name="csrf_token" value="{{ csrfToken }}">
+ <label class="form-label" for="special_cycle_start_date">Início</label>
+ <input id="special_cycle_start_date" class="form-control" type="date" name="special_cycle_start_date" value="{{ currentAppDate }}" max="{{ currentAppDate }}" autocomplete="off" required>
+ <small>Você pode informar uma data anterior. O ciclo deve ainda estar dentro dos 365 dias; o contador é zerado agora.</small>
+ <button type="submit" class="member-special-cycle-submit">Iniciar ciclo especial</button>
+ </form>
+ </details>
+ {% else %}
+ <details class="member-special-cycle-control">
+ <summary>Gerenciar ciclo especial</summary>
+ <div class="member-special-cycle-form">
+ <form action="/relatorios/warnings/{{ selectedMember.id }}/special-cycle/edit#report-goals-panel" method="post">
+ <input type="hidden" name="csrf_token" value="{{ csrfToken }}">
+ <label class="form-label" for="special_cycle_edit_start_date">Início do ciclo</label>
+ <input id="special_cycle_edit_start_date" class="form-control" type="date" name="special_cycle_start_date" value="{{ selectedMember.special_cycle_started_at }}" max="{{ currentAppDate }}" autocomplete="off" required>
+ <small>Alterar a data recalcula o término. Advertências já registradas não são reclassificadas.</small>
+ <button type="submit" class="member-special-cycle-submit">Salvar data</button>
+ </form>
+ <form action="/relatorios/warnings/{{ selectedMember.id }}/special-cycle/end#report-goals-panel" method="post" class="member-special-cycle-end-form" onsubmit="return confirm('Encerrar este ciclo especial? O contador de advertências será zerado.');">
+ <input type="hidden" name="csrf_token" value="{{ csrfToken }}">
+ <button type="submit" class="member-special-cycle-end">Encerrar ciclo</button>
+ </form>
  </div>
+ </details>
+ {% endif %}
  </div>
  {% endif %}
  </div>
@@ -655,6 +688,22 @@
  </ul>
  </details>
  {% endif %}
+
+ {% if specialCycleEvents.length %}
+ <details class="report-warning-history report-special-cycle-history">
+ <summary><ion-icon name="git-compare-outline" aria-hidden="true"></ion-icon>Histórico do ciclo especial</summary>
+ <ul class="report-deletion-log-list report-warning-log-list report-warning-history-list">
+ {% for event in specialCycleEvents %}
+ <li>
+ <strong>{% if event.action == 'started' %}Ciclo iniciado{% elif event.action == 'edited' %}Ciclo editado{% elif event.action == 'ended' %}Ciclo encerrado manualmente{% else %}Ciclo encerrado no vencimento{% endif %}</strong>
+ <small>Por {{ event.actor_name or 'Sistema' }} em {{ event.created_at | formatDateTime }}</small>
+ {% if event.previous_started_at %}<p>Período anterior: {{ event.previous_started_at | formatDate }} até {{ event.previous_ends_at | formatDate }}.</p>{% endif %}
+ <p>{{ event.note }}</p>
+ </li>
+ {% endfor %}
+ </ul>
+ </details>
+ {% endif %}
  </div>
  </div>
  </div>
@@ -875,11 +924,21 @@
 <div class="panel-header">
 <div>
 <h2>Complemento do Relatório da Quinzena</h2>
-<p>Espaço para complemento do membro. Ao salvar, ele fica registrado e entra no PDF mensal.</p>
+<p>Escreva normalmente: o rascunho é salvo automaticamente. Quando estiver pronto, envie o complemento oficial.</p>
 </div>
 </div>
 <div class="panel-body">
-<form action="/relatorios/writing/member/save" method="post" class="portal-form-grid report-monthly-export-form report-monthly-export-form-bottom">
+{% if memberFortnightNote %}
+<div class="report-fortnight-submitted" role="status">
+<strong>Complemento submetido.</strong>
+<p>{{ memberFortnightNote.content }}</p>
+<small>Submetido em: {{ memberFortnightNote.submitted_at | formatDateTime }}</small>
+</div>
+<script>
+try { localStorage.removeItem('portal:fortnight-draft:{{ currentUser.id }}:{{ selectedMember.id }}:{{ selectedNoteWeekStart }}'); } catch (error) {}
+</script>
+{% else %}
+<form id="member_fortnight_note_form" action="/relatorios/writing/member/save" method="post" class="portal-form-grid report-monthly-export-form report-monthly-export-form-bottom" data-draft-version="{{ memberFortnightDraft.version if memberFortnightDraft else 0 }}" data-draft-key="portal:fortnight-draft:{{ currentUser.id }}:{{ selectedMember.id }}:{{ selectedNoteWeekStart }}">
 <input type="hidden" name="csrf_token" value="{{ csrfToken }}">
 <input type="hidden" name="member_id" value="{{ selectedMember.id }}">
 <input type="hidden" name="week_start" value="{{ selectedNoteWeekStart }}">
@@ -889,15 +948,74 @@
 </div>
 <div class="form-group">
 <label class="form-label" for="member_fortnight_note_content">Complemento da quinzena ({{ selectedNoteWeekStart | formatDate }})</label>
-<textarea id="member_fortnight_note_content" name="content" rows="6" class="form-control" required minlength="10" {% if isSelectedFortnightClosed %}readonly{% endif %}>{{ memberFortnightNote.content if memberFortnightNote else '' }}</textarea>
+<textarea id="member_fortnight_note_content" name="content" rows="6" class="form-control" required minlength="10" maxlength="20000" {% if isSelectedFortnightClosed %}readonly{% endif %}>{{ memberFortnightDraft.content if memberFortnightDraft else '' }}</textarea>
 {% if isSelectedFortnightClosed %}
 <small class="field-error">Quinzena encerrada: edição bloqueada.</small>
+{% else %}
+<small id="member_fortnight_draft_state" class="report-draft-state" aria-live="polite">{{ ('Última edição: ' ~ (memberFortnightDraft.last_saved_at | formatDateTime)) if memberFortnightDraft else 'Rascunho ainda não salvo.' }}</small>
+<button id="member_fortnight_reload_draft" type="button" class="report-draft-reload" hidden>Usar versão salva no servidor</button>
 {% endif %}
 </div>
 <div class="form-group report-monthly-export-actions">
-<button type="submit" class="btn-submit" {% if isSelectedFortnightClosed %}disabled{% endif %}>Salvar complemento</button>
+<button type="submit" class="btn-submit" {% if isSelectedFortnightClosed %}disabled{% endif %}>Submeter complemento</button>
 </div>
 </form>
+{% if not isSelectedFortnightClosed %}
+<script>
+(() => {
+  const form = document.getElementById('member_fortnight_note_form');
+  const field = document.getElementById('member_fortnight_note_content');
+  const state = document.getElementById('member_fortnight_draft_state');
+  const reload = document.getElementById('member_fortnight_reload_draft');
+  if (!form || !field || !state) return;
+  const key = form.dataset.draftKey;
+  let version = Number(form.dataset.draftVersion || 0);
+  let timer = null;
+  let conflictDraft = null;
+  let saving = false;
+  const csrf = form.querySelector('[name="csrf_token"]').value;
+  const readLocal = () => { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (error) { return null; } };
+  const writeLocal = (pending) => { try { localStorage.setItem(key, JSON.stringify({ content: field.value, version, pending, updatedAt: Date.now() })); } catch (error) {} };
+  const formatSaved = (value) => new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value));
+  const local = readLocal();
+  if (local && typeof local.content === 'string' && (!version || Number(local.version || 0) >= version) && local.content !== field.value) {
+    field.value = local.content;
+    state.textContent = local.pending ? 'Rascunho local recuperado. Tentaremos salvar novamente.' : state.textContent;
+  }
+  async function saveDraft() {
+    if (saving || conflictDraft) return;
+    saving = true;
+    writeLocal(true);
+    state.textContent = 'Salvando…';
+    try {
+      const body = new URLSearchParams({ csrf_token: csrf, week_start: form.elements.week_start.value, content: field.value, expected_version: String(version) });
+      const response = await fetch('/relatorios/writing/member/draft', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body });
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 409 && payload.draft) {
+        conflictDraft = payload.draft;
+        state.textContent = 'Há uma versão mais recente salva em outra sessão. Seu texto foi preservado neste navegador.';
+        reload.hidden = false;
+        return;
+      }
+      if (!response.ok || !payload.draft) throw new Error(payload.error || 'Falha ao salvar');
+      version = Number(payload.draft.version || version);
+      form.dataset.draftVersion = String(version);
+      writeLocal(false);
+      state.textContent = `Rascunho salvo · última edição: ${formatSaved(payload.draft.last_saved_at)}`;
+    } catch (error) {
+      writeLocal(true);
+      state.textContent = 'Não foi possível salvar. Tentaremos novamente quando a conexão voltar.';
+    } finally { saving = false; }
+  }
+  function scheduleSave() { clearTimeout(timer); writeLocal(true); state.textContent = 'Alterações não salvas…'; timer = setTimeout(saveDraft, 700); }
+  field.addEventListener('input', () => { if (conflictDraft) { state.textContent = 'Seu texto local foi preservado. Use a versão salva ou recarregue a página para comparar.'; return; } scheduleSave(); });
+  window.addEventListener('online', () => { if (!conflictDraft && readLocal()?.pending) saveDraft(); });
+  reload.addEventListener('click', () => { if (!conflictDraft) return; const savedAt = conflictDraft.last_saved_at; field.value = conflictDraft.content || ''; version = Number(conflictDraft.version || 0); conflictDraft = null; reload.hidden = true; writeLocal(false); state.textContent = `Versão salva restaurada · última edição: ${formatSaved(savedAt || Date.now())}`; });
+  form.addEventListener('submit', () => { clearTimeout(timer); writeLocal(true); });
+})();
+</script>
+{% endif %}
+{% endif %}
 </div>
 </section>
 {% endif %}

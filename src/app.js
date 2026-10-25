@@ -80,7 +80,7 @@ const ALMOX_TABS = new Set([
 ]);
 const INVENTORY_ITEM_TYPES = new Set(["stock", "patrimony"]);
 const DEFAULT_PROJECT_COLOR = "#0b6bcb";
-const REPORTS_TIMEZONE = "America/Sao_Paulo";
+const REPORTS_TIMEZONE = config.reportsTimeZone || "America/Sao_Paulo";
 const ENABLE_REQUEST_LOGS = String(process.env.REQUEST_LOGS || "").trim() === "1";
 const ENABLE_PERFORMANCE_LOGS = String(process.env.PERFORMANCE_LOGS || "").trim() === "1";
 const SLOW_REQUEST_MS = Math.max(
@@ -844,10 +844,12 @@ function render(res, template, data = {}) {
   async function renderReportPage(req, res, data = {}) {
     if (Date.now() - warningCycleLastCheckedAt >= warningCycleCheckIntervalMs) {
       warningCycleLastCheckedAt = Date.now();
+      (await database.closeExpiredMemberWarningSpecialCycles());
       (await database.applySemiannualMemberWarningCycle());
     }
     const currentMember = (await getCurrentMember(req));
     const currentWeekStart = getCurrentWeekStartDate();
+    const currentAppDate = toSqlDateTime(new Date()).slice(0, 10);
     const selectedNoteWeekStart = normalizeWeekStartDate(req.query.note_week_start) || currentWeekStart;
     const nowSql = toSqlDateTime(new Date());
     if (Date.now() - plannerLifecycleLastCheckedAt >= plannerLifecycleCheckIntervalMs) {
@@ -896,11 +898,18 @@ function render(res, template, data = {}) {
         weekStart: selectedNoteWeekStart,
       }))
       : null;
+    const memberFortnightDraft = canWriteOwnFortnightComplement && !memberFortnightNote
+      ? (await database.getReportFortnightMemberDraft({
+        memberId: selectedMember.id,
+        authorUserId: req.currentUser.id,
+        weekStart: selectedNoteWeekStart,
+      }))
+      : null;
     const defaultTutorUser = canWriteOwnFortnightComplement
       ? ((await database.listUsers()).find((user) => user.role === "tutor") || null)
       : null;
     const isSelectedFortnightClosed = Boolean(selectedMember && selectedNoteWeekStart && (
-      String(selectedNoteWeekStart) < String(currentWeekStart)
+      String(selectedNoteWeekStart) !== String(currentWeekStart)
     ));
     const requestedProjectId = parseId(data.selectedProjectId || req.query.project_id);
     const currentMemberProjectList = currentMember?.is_active
@@ -1035,6 +1044,9 @@ function render(res, template, data = {}) {
 
     const warningEvents = selectedMember ? (await database.listMemberWarningEvents(selectedMember.id)) : [];
     const activeWarningEvents = warningEvents.filter((event) => event.is_warning && !event.is_deleted);
+    const specialCycleEvents = selectedMember
+      ? (await database.listMemberWarningSpecialCycleEvents(selectedMember.id))
+      : [];
 
     return render(res, "reports/index.html", {
       title: "Relatórios",
@@ -1046,6 +1058,7 @@ function render(res, template, data = {}) {
       canManageWarnings,
       warningEvents,
       activeWarningEvents,
+      specialCycleEvents,
       membersSummary,
       reportProjectOptions,
       createGoalProjectOptions,
@@ -1063,6 +1076,7 @@ function render(res, template, data = {}) {
         : [],
       tutorFortnightNote,
       memberFortnightNote,
+      memberFortnightDraft,
       canWriteOwnFortnightComplement,
       defaultTutorUser,
       isSelectedFortnightClosed,
@@ -1072,6 +1086,7 @@ function render(res, template, data = {}) {
       canCreateGoalsForSelectedMember,
       canUseAdvancedGoalCreateForm,
       currentWeekStart,
+      currentAppDate,
       selectedNoteWeekStart,
       currentMember,
       goalFormData: {

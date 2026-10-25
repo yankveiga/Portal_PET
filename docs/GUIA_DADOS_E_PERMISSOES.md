@@ -47,6 +47,8 @@ Advertencias:
 - `member_warning_event`
 - `member_warning_restriction`
 - `member_warning_cycle`
+- `member_warning_special_cycle`
+- `member_warning_special_cycle_event`
 
 Planner:
 
@@ -258,6 +260,12 @@ Regra:
 - Quem tem menos de 3 advertencias zera.
 - Quem tem 3 advertencias entra/inicia acompanhamento de 365 dias.
 - A aplicacao do ciclo e preguicosa: acontece quando relatorios sao carregados, sem job diario.
+
+### `member_warning_special_cycle`
+
+Registra o ciclo especial de 365 dias iniciado explicitamente pelo Administrativo. O início pode ser informado em uma data anterior, desde que o período ainda esteja ativo; o contador é zerado no momento do registro, sem reclassificar advertências históricas. Enquanto está ativo, o membro não entra nos zeramentos gerais de `01/01` e `02/07`.
+
+O início, cada alteração de data, o encerramento manual e o vencimento automático ficam registrados com responsável e data em `member_warning_special_cycle_event`. No vencimento, a aplicação encerra o ciclo de forma idempotente na inicialização e ao processar as rotinas de advertência, registra o retorno ao contador geral com zero e preserva os eventos do ciclo para consulta.
 
 ### Permissao de advertencias
 

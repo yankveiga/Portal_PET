@@ -1,8 +1,8 @@
 # Portal PET C3
 
-Aplicação interna em Node.js + Express + Nunjucks para centralizar rotinas do PET C3: relatórios, planner, atas, almoxarifado, presença, mensagens e manutenção administrativa.
+O Portal PET C3 reúne ferramentas utilizadas no dia a dia do grupo, como relatórios quinzenais, planejamento de atividades, atas, controle de estoque, presença em eventos e administração de usuários.
 
-## Interface
+## Telas
 
 ![Tela de login](docs/tela_login.png)
 
@@ -14,61 +14,47 @@ Aplicação interna em Node.js + Express + Nunjucks para centralizar rotinas do 
 
 ![Almoxarifado](docs/almoxarifado.png)
 
-## Em um minuto
+## Funcionalidades
 
-| | |
-| --- | --- |
-| Problema | Rotinas do grupo distribuídas entre relatórios, planejamento, atas e controles administrativos. |
-| Solução | Um portal com fluxos para membros e administração do PET C3. |
-| Minha participação | Desenvolvimento individual da aplicação. |
-| Código | [Templates das telas](app/templates/) · [Estilos e arquivos estáticos](app/static/) · [Rotas](src/routes/) |
+- **Relatórios quinzenais:** registro de atividades por membro e projeto.
+- **Planner:** planejamento de atividades integrado aos relatórios.
+- **Advertências:** registro e acompanhamento por membro, com histórico e ciclo especial de 365 dias.
+- **Atas:** criação e geração de documentos em PDF.
+- **Almoxarifado:** controle de estoque, patrimônio, retiradas, empréstimos e histórico.
+- **Presença:** cadastro de eventos e ouvintes, importação de CSV, check-in por crachá e exportação de dados.
+- **Mensagens:** conversas privadas e comunicação administrativa.
+- **Escrita:** registros gerais e anotações privadas do tutor.
+- **Cadastros:** gerenciamento de membros, projetos e usuários.
 
-## Interface e experiência
+O módulo PETrello não faz parte da versão atual.
 
-- O planner se conecta aos relatórios para acompanhar atividades planejadas e realizadas.
-- A página inicial autenticada abre diretamente em relatórios, uma das tarefas recorrentes do grupo.
-- As rotas separam atividades dos membros e funções administrativas, com permissões documentadas no [guia de dados e permissões](docs/GUIA_DADOS_E_PERMISSOES.md).
+## Tecnologias
 
-## Módulos principais
+- **Backend:** Node.js e Express
+- **Templates:** Nunjucks
+- **Banco de dados:** PostgreSQL, normalmente hospedado no Neon
+- **Sessões:** `cookie-session`
+- **Uploads:** armazenamento local ou Cloudinary
+- **PDF:** PDFKit
+- **Planilhas e CSV:** ExcelJS e geração manual de CSV
 
-- Relatórios quinzenais por membro e projeto.
-- Planner integrado aos relatórios.
-- Sistema de advertências por membro, com auditoria e acompanhamento de 365 dias.
-- Atas com geração de PDF.
-- Almoxarifado: estoque, patrimônio, retiradas, empréstimos e histórico.
-- Presença por eventos: atividades, ouvintes, importação CSV, check-in e exportação.
-- Mensagens privadas e conversas administrativas somente leitura.
-- Escrita geral e escrita privada de tutor.
-- CRUD de membros, projetos e usuários.
-
-Observação: o módulo PETrello não faz parte da versão atual.
-
-## Stack
-
-- Backend: Node.js + Express
-- Templates: Nunjucks
-- Banco: PostgreSQL, normalmente Neon
-- Sessão: `cookie-session`
-- Uploads: local ou Cloudinary
-- PDF: PDFKit
-- XLSX/CSV: `exceljs` e geração manual de CSV
-- Deploy atual/alvo: Render, podendo rodar localmente com túnel temporário
+A aplicação pode ser executada localmente e está preparada para hospedagem no Render.
 
 ## Requisitos
 
-- Node.js 18+
-- npm 9+
-- PostgreSQL acessível por `DATABASE_URL`
+- Node.js 18 ou superior
+- npm 9 ou superior
+- Acesso a um banco PostgreSQL por meio da variável `DATABASE_URL`
 
-## Como rodar localmente
+## Executando localmente
 
-1. Instale as dependências:
+Clone o repositório, acesse a pasta do projeto e instale as dependências:
 
 ```bash
 npm install
 ```
 
-2. Crie um `.env` na raiz. Exemplo mínimo:
+Crie um arquivo `.env` na raiz do projeto:
 
 ```env
 NODE_ENV=development
@@ -81,92 +67,91 @@ REPORTS_TIMEZONE=America/Sao_Paulo
 APP_BASE_URL=http://127.0.0.1:3000
 ```
 
-3. Opcionalmente, crie um usuário inicial:
+Substitua os valores de exemplo pelas configurações do seu ambiente. Consulte a seção de variáveis de ambiente e os guias em `docs/` para conhecer as demais opções.
+
+Se necessário, crie um usuário inicial:
 
 ```bash
 npm run create-user
 ```
 
-4. Inicie a aplicação:
+Inicie a aplicação:
 
 ```bash
 npm run dev
 ```
 
-URL local padrão:
-
-```text
-http://127.0.0.1:3000
-```
+O endereço local padrão é http://127.0.0.1:3000.
 
 ## Scripts
 
-```bash
-npm run dev
-npm start
-npm run create-user
-npm run verify
-npm run notify:run-once
-```
+| Comando | Função |
+| --- | --- |
+| `npm run dev` | Inicia a aplicação em desenvolvimento. |
+| `npm start` | Inicia a aplicação. |
+| `npm run create-user` | Cria um usuário inicial. |
+| `npm run verify` | Verifica os principais fluxos da aplicação em um schema temporário do PostgreSQL. |
+| `npm test` | Executa os testes, incluindo os testes isolados de advertências. |
+| `npm run notify:run-once` | Executa uma rodada de notificações. |
 
-`npm run verify` cria um schema PostgreSQL temporario, valida os fluxos e remove o schema ao terminar. A conexao precisa de permissao para criar schemas. `npm test` inclui tambem os testes isolados de advertencias. Em Neon, a verificacao usa o endpoint direto do mesmo banco para isolar o `search_path`.
+O comando `npm run verify` precisa de permissão para criar schemas no banco. Em ambientes Neon, a verificação utiliza a conexão direta do banco para isolar o `search_path`. O schema temporário é removido ao final da execução.
 
-## Rotas importantes
+## Rotas
 
-- `/login`: entrada do sistema.
-- `/relatorios`: página inicial autenticada.
-- `/planner`: planner.
-- `/home`: atas recentes.
-- `/atas/nova`: criação de ata.
-- `/almoxarifado`: almoxarifado.
-- `/presenca/check-in`: check-in por crachá.
-- `/presenca/eventos`: atividades de presença.
-- `/presenca/ouvintes`: cadastro/importação de ouvintes.
-- `/mensagens`: chat.
-- `/projects`: projetos.
-- `/members`: membros.
-- `/manutencao-usuarios`: usuários e senhas.
-- `/healthz`: healthcheck.
+| Rota | Descrição |
+| --- | --- |
+| `/login` | Login. |
+| `/relatorios` | Página inicial após o login. |
+| `/planner` | Planejamento de atividades. |
+| `/home` | Atas recentes. |
+| `/atas/nova` | Criação de atas. |
+| `/almoxarifado` | Controle de estoque e patrimônio. |
+| `/presenca/check-in` | Check-in por crachá. |
+| `/presenca/eventos` | Gerenciamento de eventos. |
+| `/presenca/ouvintes` | Cadastro e importação de ouvintes. |
+| `/mensagens` | Mensagens. |
+| `/projects` | Projetos. |
+| `/members` | Membros. |
+| `/manutencao-usuarios` | Gerenciamento de usuários e senhas. |
+| `/healthz` | Verificação de disponibilidade da aplicação. |
 
-## Regras importantes
+## Regras e funcionamento
 
-- Fuso principal: `America/Sao_Paulo`.
-- Página inicial autenticada: `/relatorios`.
-- Usuários são desativados logicamente, não apagados fisicamente, para preservar histórico.
+- O fuso horário principal é `America/Sao_Paulo`.
+- A página inicial após o login é `/relatorios`.
+- Usuários são desativados logicamente para preservar o histórico.
 - Membros inativos deixam de aparecer nas listas operacionais.
-- Relatorios quinzenais encerram no fechamento oficial da quinzena:
-  - primeira quinzena: ate o fim do dia 15;
-  - segunda quinzena: ate o fim do ultimo dia do mes.
-- O planner e os relatórios se conectam por `report_week_goal.planner_task_id`.
-- Advertências são históricas e append-only: não apagar histórico.
-- Presença usa PostgreSQL como fonte de verdade; CSV local é apenas contingência.
-- Ouvintes de presença usam `cracha,nome,cpf,email`.
+- Os relatórios quinzenais seguem o calendário oficial: a primeira quinzena termina no dia 15 e a segunda, no último dia do mês.
+- Complementos de relatórios ficam separados dos registros oficiais e só podem ser enviados manualmente durante a quinzena vigente.
+- O planner se relaciona com os relatórios por meio de `report_week_goal.planner_task_id`.
+- O histórico de advertências é preservado. Os registros não devem ser apagados.
+- O PostgreSQL é a fonte oficial dos dados de presença. O CSV local serve apenas como contingência.
+- O cadastro de ouvintes utiliza as colunas `cracha,nome,cpf,email`.
 
-## Performance
+## Banco de dados e desempenho
 
-- Todas as operacoes de banco em `src/database.js` sao assincronas e usam o pool de `src/postgres.js`. As rotas e scripts devem usar `await`.
-- `PG_POOL_MAX` limita as conexoes por processo (padrao: 6); `DB_SLOW_QUERY_MS` ativa o log de duracao sem expor parametros.
-- Transacoes reutilizam a mesma conexao nos helpers. As escritas compostas usam exclusao mutua transacional para preservar estoque e auditoria durante acessos concorrentes.
-- Evite adicionar consultas em middleware global.
-- Evite consultas dentro de loops quando uma query com join resolver.
-- Telas grandes devem carregar apenas o necessário para a aba/visão atual.
-- Assets estáticos ficam em `/static` e devem passar antes de middlewares caros.
-- Para investigar lentidão:
+As operações de banco em `src/database.js` são assíncronas e utilizam o pool de conexões definido em `src/postgres.js`. Rotas e scripts devem aguardar essas operações com `await`.
 
-```env
-REQUEST_LOGS=1
-```
+Algumas configurações disponíveis:
 
-Depois veja os tempos das rotas nos logs e compare com a latência do banco.
+- `PG_POOL_MAX`: máximo de conexões por processo, com padrão de 6.
+- `DB_SLOW_QUERY_MS`: limite para registrar consultas demoradas nos logs.
+- `REQUEST_LOGS=1`: habilita os registros de duração das requisições.
+
+As transações reutilizam a mesma conexão nos helpers. Operações que envolvem várias escritas utilizam exclusão mútua transacional para preservar a consistência do estoque e da auditoria em acessos simultâneos.
+
+Ao investigar problemas de desempenho, comece pelos tempos registrados nas rotas e pela latência do banco. Evite consultas desnecessárias em middlewares globais e dentro de loops quando uma consulta com `JOIN` resolver o problema. As telas também devem carregar apenas os dados necessários para a visualização atual.
+
+Os arquivos estáticos ficam em `/static` e devem ser servidos antes dos middlewares mais custosos, conforme a organização atual da aplicação.
 
 ## Variáveis de ambiente
 
-Obrigatórias:
+**Obrigatórias**
 
 - `DATABASE_URL`
 - `SECRET_KEY`
 
-Recomendadas:
+**Aplicação e sessão**
 
 - `NODE_ENV`
 - `PORT`
@@ -175,21 +160,21 @@ Recomendadas:
 - `APP_TIMEZONE`
 - `REPORTS_TIMEZONE`
 
-Bootstrap opcional:
+**Criação inicial de administrador**
 
 - `BOOTSTRAP_ADMIN`
 - `BOOTSTRAP_ADMIN_USERNAME`
 - `BOOTSTRAP_ADMIN_PASSWORD`
 - `BOOTSTRAP_ADMIN_NAME`
 
-Uploads opcionais:
+**Uploads**
 
 - `CLOUDINARY_CLOUD_NAME`
 - `CLOUDINARY_API_KEY`
 - `CLOUDINARY_API_SECRET`
 - `CLOUDINARY_FOLDER`
 
-Email/notificações opcionais:
+**E-mail e notificações**
 
 - `EMAIL_PROVIDER`
 - `BREVO_API_KEY`
@@ -198,53 +183,47 @@ Email/notificações opcionais:
 - `EMAIL_REPLY_TO`
 - `NOTIFICATION_SWEEP_INTERVAL_MS`
 
-Ajustes técnicos opcionais:
+**Configurações técnicas**
 
 - `REQUEST_LOGS`
 - `DB_SYNC_QUERY_TIMEOUT_MS`
 - `PG_CONNECTION_TIMEOUT_MS`
 
-## Hospedagem temporária local
+Consulte os arquivos de configuração e os guias do projeto para verificar os valores padrão e quais variáveis são necessárias em cada ambiente.
 
-Para expor o app local temporariamente:
+## Acesso temporário pela internet
+
+Para disponibilizar a aplicação localmente por um período curto, inicie o servidor:
 
 ```powershell
 npm start
 ```
 
-Em outro terminal:
+Em outro terminal, execute o Cloudflare Tunnel:
 
 ```powershell
 .\cloudflared-windows-amd64.exe tunnel --url http://localhost:3000
 ```
 
-O Cloudflare gera uma URL temporária `trycloudflare.com`. Mantenha o terminal aberto enquanto precisar do túnel.
+O comando gera um endereço temporário em `trycloudflare.com`. O servidor e o túnel precisam permanecer em execução enquanto a aplicação estiver sendo utilizada.
 
-## Documentação
+## Documentação do projeto
 
-Leia os guias em `docs/` antes de mexer:
+Os guias em `docs/` contêm informações complementares para desenvolvimento e operação:
 
-- [GUIA_DESENVOLVIMENTO.md](./docs/GUIA_DESENVOLVIMENTO.md): arquitetura, mapa de arquivos e como alterar com segurança.
-- [GUIA_DADOS_E_PERMISSOES.md](./docs/GUIA_DADOS_E_PERMISSOES.md): tabelas, regras, permissões e advertências.
-- [GUIA_OPERACAO.md](./docs/GUIA_OPERACAO.md): deploy, ambiente, incidentes, backup, presença em evento e túnel local.
+- [Guia de desenvolvimento](docs/GUIA_DESENVOLVIMENTO.md): arquitetura, organização dos arquivos e orientações para alterações.
+- [Guia de dados e permissões](docs/GUIA_DADOS_E_PERMISSOES.md): tabelas, regras de negócio, permissões e advertências.
+- [Guia de operação](docs/GUIA_OPERACAO.md): hospedagem, configuração do ambiente, incidentes, backups, presença em eventos e túnel local.
 
-## Antes de compartilhar a pasta
+## Antes de compartilhar o projeto
 
-Não envie:
+Não inclua arquivos `.env`, a pasta `node_modules/`, logs, backups do banco, planilhas com dados reais, uploads com informações pessoais ou credenciais.
 
-- `.env`
-- `node_modules/`
-- arquivos `.log`
-- dumps/backups de banco
-- CSVs ou planilhas com dados reais
-- uploads com dados pessoais
-- tokens, chaves privadas ou credenciais
-
-Antes de entregar para outra pessoa:
+Antes de entregar uma versão, execute:
 
 ```bash
 npm run verify
 git status --short
 ```
 
-Última revisão: 25/09/2026
+Última revisão: 25/09/2026.

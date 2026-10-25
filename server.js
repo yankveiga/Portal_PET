@@ -61,6 +61,7 @@ async function ensureSchemaWithRetry(maxAttempts = 5) {
 
 async function startServer() {
   await ensureSchemaWithRetry();
+  await database.closeExpiredMemberWarningSpecialCycles();
 
   if (config.bootstrapAdmin.enabled) {
     const { username, password, name } = config.bootstrapAdmin;

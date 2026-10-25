@@ -10,6 +10,7 @@ async function main() {
 const events = [];
 const context = vm.createContext({
   isUserMemberOfProjectName: (id) => id === 10 || id === 11,
+  closeExpiredMemberWarningSpecialCycles: async () => ({ closed: 0 }),
   getMemberWarningState: (id) => ({ warning_count: events.filter(e => e.member_id === id).at(-1)?.new_count || 0 }),
   withTransaction: (callback) => callback(context.getDb()),
   getDb: () => ({ prepare: () => ({
@@ -55,6 +56,9 @@ registerReportRoutes({
     isUserMemberOfProjectName: () => membership,
     getMemberById: () => ({ id: 6 }),
     mutateMemberWarning: () => { writes++; return { warning_count: 1, previous_count: 0 }; },
+    startMemberWarningSpecialCycle: () => { writes++; return { special_cycle_is_active: true }; },
+    editMemberWarningSpecialCycle: () => { writes++; return { special_cycle_is_active: true }; },
+    endMemberWarningSpecialCycle: () => { writes++; return { special_cycle_is_active: false }; },
   },
 });
 const request = { currentUser: { id: 1, is_admin: true }, params: { memberId: 6 }, body: {}, flash() {} };
@@ -72,6 +76,39 @@ assert.equal(writes, 0);
 csrf = true;
 await handler(request, response);
 assert.equal(writes, 1);
+
+writes = 0;
+const specialHandler = routes['/relatorios/warnings/:memberId/special-cycle/start'];
+request.body = { special_cycle_start_date: '2026-10-25' };
+membership = false;
+await specialHandler(request, response);
+assert.equal(writes, 0);
+membership = true;
+csrf = false;
+await specialHandler(request, response);
+assert.equal(writes, 0);
+csrf = true;
+await specialHandler(request, response);
+assert.equal(writes, 1);
+
+for (const route of [
+  '/relatorios/warnings/:memberId/special-cycle/edit',
+  '/relatorios/warnings/:memberId/special-cycle/end',
+]) {
+  const cycleHandler = routes[route];
+  writes = 0;
+  membership = false;
+  csrf = true;
+  await cycleHandler(request, response);
+  assert.equal(writes, 0);
+  membership = true;
+  csrf = false;
+  await cycleHandler(request, response);
+  assert.equal(writes, 0);
+  csrf = true;
+  await cycleHandler(request, response);
+  assert.equal(writes, 1);
+}
 
 const env = new nunjucks.Environment(null, { autoescape: true });
 for (const filter of ['formatDate', 'formatDateTime']) env.addFilter(filter, v => v || '');

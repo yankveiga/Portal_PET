@@ -1,4 +1,5 @@
 const asyncArray = require("../asyncArray");
+const { normalizeFortnightStart } = require("../services/fortnightService");
 /*
  * ARQUIVO: src/routes/reports.js
  * FUNCAO: registra rotas de relatorios quinzenais e exportacao mensal em PDF.
@@ -59,11 +60,7 @@ function registerReportRoutes(ctx) {
   }
 
   function normalizeWeekStartInput(value, fallbackWeekStart) {
-    const raw = String(value || "").trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-      return raw;
-    }
-    return fallbackWeekStart;
+    return normalizeFortnightStart(value) || fallbackWeekStart;
   }
 
   function wantsJsonResponse(req) {
@@ -137,6 +134,80 @@ function registerReportRoutes(ctx) {
     }));
     req.flash("success", "Acompanhamento de 365 dias iniciado.");
     return res.redirect(`/relatorios?member_id=${member.id}#report-goals-panel`);
+  });
+
+  app.post("/relatorios/warnings/:memberId/special-cycle/start", requireAuth, async (req, res) => {
+    if (!ensureValidCsrf(req, res)) return;
+    if (!(await database.isUserMemberOfProjectName(req.currentUser.id, "Administrativo"))) {
+      req.flash("warning", "Sem permissão para iniciar ciclo especial.");
+      return res.redirect("/relatorios#report-goals-panel");
+    }
+    const memberId = parseId(req.params.memberId);
+    const member = memberId ? (await database.getMemberById(memberId)) : null;
+    if (!member) {
+      req.flash("warning", "Membro inválido.");
+      return res.redirect("/relatorios");
+    }
+    try {
+      await database.startMemberWarningSpecialCycle({
+        memberId: member.id,
+        actorUserId: req.currentUser.id,
+        startedAt: req.body.special_cycle_start_date,
+      });
+      req.flash("success", "Ciclo especial de advertências iniciado com contador zerado.");
+    } catch (error) {
+      if (!error.warningValidation) throw error;
+      req.flash("warning", error.message);
+    }
+    return res.redirect(`/relatorios?member_id=${member.id}&warnings=1#report-goals-panel`);
+  });
+
+  app.post("/relatorios/warnings/:memberId/special-cycle/edit", requireAuth, async (req, res) => {
+    if (!ensureValidCsrf(req, res)) return;
+    if (!(await database.isUserMemberOfProjectName(req.currentUser.id, "Administrativo"))) {
+      req.flash("warning", "Sem permissão para editar ciclo especial.");
+      return res.redirect("/relatorios#report-goals-panel");
+    }
+    const memberId = parseId(req.params.memberId);
+    const member = memberId ? (await database.getMemberById(memberId)) : null;
+    if (!member) {
+      req.flash("warning", "Membro inválido.");
+      return res.redirect("/relatorios");
+    }
+    try {
+      await database.editMemberWarningSpecialCycle({
+        memberId: member.id,
+        actorUserId: req.currentUser.id,
+        startedAt: req.body.special_cycle_start_date,
+      });
+      req.flash("success", "Data do ciclo especial atualizada.");
+    } catch (error) {
+      if (!error.warningValidation) throw error;
+      req.flash("warning", error.message);
+    }
+    return res.redirect(`/relatorios?member_id=${member.id}&warnings=1#report-goals-panel`);
+  });
+
+  app.post("/relatorios/warnings/:memberId/special-cycle/end", requireAuth, async (req, res) => {
+    if (!ensureValidCsrf(req, res)) return;
+    if (!(await database.isUserMemberOfProjectName(req.currentUser.id, "Administrativo"))) {
+      req.flash("warning", "Sem permissão para encerrar ciclo especial.");
+      return res.redirect("/relatorios#report-goals-panel");
+    }
+    const memberId = parseId(req.params.memberId);
+    const member = memberId ? (await database.getMemberById(memberId)) : null;
+    if (!member) {
+      req.flash("warning", "Membro inválido.");
+      return res.redirect("/relatorios");
+    }
+    try {
+      await database.endMemberWarningSpecialCycle({ memberId: member.id, actorUserId: req.currentUser.id });
+      req.flash("success", "Ciclo especial encerrado e contador zerado.");
+    } catch (error) {
+      if (!error.warningValidation) throw error;
+      req.flash("warning", error.message);
+    }
+    return res.redirect(`/relatorios?member_id=${member.id}&warnings=1#report-goals-panel`);
   });
 
   app.get("/relatorios/monthly/pdf", requireAuth, async (req, res) => {
@@ -1053,6 +1124,48 @@ function registerReportRoutes(ctx) {
     }
   });
 
+  app.get("/relatorios/writing/member/draft", requireAuth, async (req, res) => {
+    if (req.currentUser?.role === "tutor") return res.status(403).json({ error: "Este complemento é exclusivo de membros." });
+    const currentMember = await getCurrentMember(req);
+    const weekStart = normalizeWeekStartInput(req.query.week_start, getCurrentWeekStartDate());
+    if (!currentMember?.is_active || weekStart !== getCurrentWeekStartDate()) {
+      return res.status(403).json({ error: "A quinzena solicitada não está aberta para edição." });
+    }
+    const draft = await database.getReportFortnightMemberDraft({
+      memberId: currentMember.id,
+      authorUserId: req.currentUser.id,
+      weekStart,
+    });
+    return res.json({ draft });
+  });
+
+  app.post("/relatorios/writing/member/draft", requireAuth, async (req, res) => {
+    if (!ensureValidCsrf(req, res)) return;
+    if (req.currentUser?.role === "tutor") return res.status(403).json({ error: "Este complemento é exclusivo de membros." });
+    const currentMember = await getCurrentMember(req);
+    const currentWeekStart = getCurrentWeekStartDate();
+    const weekStart = normalizeWeekStartInput(req.body.week_start, currentWeekStart);
+    if (!currentMember?.is_active || weekStart !== currentWeekStart) {
+      return res.status(403).json({ error: "A quinzena já foi encerrada e não pode ser editada." });
+    }
+    try {
+      const result = await database.saveReportFortnightMemberDraft({
+        memberId: currentMember.id,
+        authorUserId: req.currentUser.id,
+        weekStart,
+        content: req.body.content,
+        expectedVersion: req.body.expected_version === "" || req.body.expected_version === undefined
+          ? null
+          : Number(req.body.expected_version),
+      });
+      if (result.conflict) return res.status(409).json({ error: "O rascunho foi atualizado em outra sessão.", draft: result.draft });
+      return res.json({ draft: result.draft });
+    } catch (error) {
+      logError(req, "Erro ao salvar rascunho do complemento:", error);
+      return res.status(422).json({ error: error.message || "Não foi possível salvar o rascunho." });
+    }
+  });
+
   app.post("/relatorios/writing/member/save", requireAuth, async (req, res) => {
     if (!ensureValidCsrf(req, res)) {
       return;
@@ -1073,8 +1186,8 @@ function registerReportRoutes(ctx) {
       return res.redirect("/relatorios#report-writing-panel");
     }
 
-    if (weekStart < currentWeekStart) {
-      req.flash("warning", "A quinzena ja foi encerrada e nao pode ser editada.");
+    if (weekStart !== currentWeekStart) {
+      req.flash("warning", "Apenas a quinzena vigente pode receber um complemento.");
       return res.redirect(`/relatorios${buildReportsQuery({ memberId })}#report-writing-panel`);
     }
 
@@ -1085,15 +1198,25 @@ function registerReportRoutes(ctx) {
 
     try {
       const tutorUser = (await database.listUsers()).find((user) => user.role === "tutor") || null;
-      (await database.upsertReportFortnightMemberNote({
+      const result = await database.submitReportFortnightMemberDraft({
         memberId,
         authorUserId: req.currentUser.id,
         targetTutorUserId: tutorUser?.id || null,
         weekStart,
         content,
-      }));
+        source: "manual",
+      });
 
-      req.flash("success", "Complemento salvo. Ele sera incluido no relatorio em PDF.");
+      if (result.status === "already_submitted") {
+        req.flash("warning", "Este complemento já foi submetido e não pode ser alterado.");
+        return res.redirect(`/relatorios${buildReportsQuery({ memberId })}#report-writing-panel`);
+      }
+      if (result.status !== "submitted") {
+        req.flash("warning", result.message || "Não foi possível submeter o complemento.");
+        return res.redirect(`/relatorios${buildReportsQuery({ memberId })}#report-writing-panel`);
+      }
+
+      req.flash("success", "Complemento submetido. Ele será incluído no relatório em PDF.");
       return res.redirect(`/relatorios${buildReportsQuery({ memberId })}#report-writing-panel`);
     } catch (error) {
       logError(req, "Erro ao salvar complemento do membro:", error);

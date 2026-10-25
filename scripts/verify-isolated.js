@@ -56,6 +56,53 @@ async function main() {
     const warnings = await Promise.allSettled([1, 2, 3, 4].map(() => database.mutateMemberWarning({ memberId: member.id, actorUserId: adminUser.id, action: "add", note: "Isolado" })));
     assert.equal(warnings.filter(result => result.status === "fulfilled").length, 3);
     assert.equal((await database.getMemberWarningState(member.id)).warning_count, 3);
+    const specialCycle = await database.startMemberWarningSpecialCycle({ memberId: member.id, actorUserId: adminUser.id });
+    assert.equal(specialCycle.special_cycle_is_active, true);
+    assert.equal(specialCycle.warning_count, 0);
+    assert.equal(specialCycle.special_cycle_days_remaining, 365);
+    const retroactiveMember = await database.createMember("Membro de ciclo retroativo");
+    const retroactiveStartDate = new Date(`${specialCycle.special_cycle_started_at}T00:00:00Z`);
+    retroactiveStartDate.setUTCDate(retroactiveStartDate.getUTCDate() - 30);
+    const retroactiveStart = retroactiveStartDate.toISOString().slice(0, 10);
+    const retroactiveCycle = await database.startMemberWarningSpecialCycle({
+      memberId: retroactiveMember.id,
+      actorUserId: adminUser.id,
+      startedAt: retroactiveStart,
+    });
+    assert.equal(retroactiveCycle.special_cycle_started_at, retroactiveStart);
+    assert.equal(retroactiveCycle.special_cycle_days_remaining, 335);
+    const editedRetroactiveDate = new Date(`${retroactiveStart}T00:00:00Z`);
+    editedRetroactiveDate.setUTCDate(editedRetroactiveDate.getUTCDate() + 10);
+    const editedRetroactiveStart = editedRetroactiveDate.toISOString().slice(0, 10);
+    const editedRetroactiveCycle = await database.editMemberWarningSpecialCycle({
+      memberId: retroactiveMember.id,
+      actorUserId: adminUser.id,
+      startedAt: editedRetroactiveStart,
+    });
+    assert.equal(editedRetroactiveCycle.special_cycle_started_at, editedRetroactiveStart);
+    const retroactiveAudit = await database.listMemberWarningSpecialCycleEvents(retroactiveMember.id);
+    assert.deepEqual(retroactiveAudit.slice(0, 2).map((event) => event.action), ["edited", "started"]);
+    assert.equal(retroactiveAudit[0].actor_user_id, adminUser.id);
+    await database.endMemberWarningSpecialCycle({ memberId: retroactiveMember.id, actorUserId: adminUser.id });
+    assert.equal((await database.getMemberWarningState(retroactiveMember.id)).special_cycle_is_active, false);
+    assert.equal((await database.getMemberWarningState(retroactiveMember.id)).warning_count, 0);
+    assert.equal((await database.listMemberWarningSpecialCycleEvents(retroactiveMember.id))[0].action, "ended");
+    const recreatedCycle = await database.startMemberWarningSpecialCycle({
+      memberId: retroactiveMember.id,
+      actorUserId: adminUser.id,
+      startedAt: editedRetroactiveStart,
+    });
+    assert.equal(recreatedCycle.special_cycle_started_at, editedRetroactiveStart, "Um ciclo encerrado pode ser recriado na mesma data.");
+    await database.mutateMemberWarning({ memberId: member.id, actorUserId: adminUser.id, action: "add", note: "Advertência no ciclo especial" });
+    const specialCycleWithWarning = await database.getMemberWarningState(member.id);
+    assert.equal(specialCycleWithWarning.warning_count, 1);
+    await database.applySemiannualMemberWarningCycle({ now: new Date("2027-01-01T12:00:00Z") });
+    assert.equal((await database.getMemberWarningState(member.id)).warning_count, 1, "Ciclo especial não pode ser zerado no calendário geral.");
+    await database.closeExpiredMemberWarningSpecialCycles({ today: specialCycle.special_cycle_ends_at });
+    const endedSpecialCycle = await database.getMemberWarningState(member.id, { today: specialCycle.special_cycle_ends_at });
+    assert.equal(endedSpecialCycle.special_cycle_is_active, false);
+    assert.equal(endedSpecialCycle.warning_count, 0);
+    assert.ok((await database.listMemberWarningEvents(member.id)).some((event) => event.event_type === "special_cycle_ended"));
 
     const task = await database.createPlannerTask({ projectId: project.id, assignedMemberId: member.id, createdByUserId: adminUser.id, title: "Tarefa isolada", dueAt: "2026-10-10 12:00:00" });
     await database.syncReportWeekGoalFromPlannerTask(task, { createdByUserId: adminUser.id });
@@ -99,6 +146,23 @@ async function main() {
     assert.equal((await database.listAttendees()).find(row => row.id === attendee.id).event_count, 3);
     await database.upsertReportFortnightMemberNote({ memberId: member.id, authorUserId: adminUser.id, weekStart: "2026-10-01", content: "Complemento de teste" });
     assert.equal((await database.getReportFortnightMemberNote({ memberId: member.id, weekStart: "2026-10-01" })).content, "Complemento de teste");
+    const draftMember = await database.createMember("Membro de rascunho isolado");
+    const draftUser = await database.createUser("isolated_draft", await bcrypt.hash("isolated-draft", 4), { name: "Rascunho isolado", role: "common", memberId: draftMember.id });
+    const firstDraft = await database.saveReportFortnightMemberDraft({ memberId: draftMember.id, authorUserId: draftUser.id, weekStart: "2098-12-16", content: "Primeira versão do rascunho" });
+    assert.equal(firstDraft.draft.version, 1);
+    const updatedDraft = await database.saveReportFortnightMemberDraft({ memberId: draftMember.id, authorUserId: draftUser.id, weekStart: "2098-12-16", content: "Segunda versão do rascunho", expectedVersion: 1 });
+    assert.equal(updatedDraft.draft.version, 2);
+    const rejectedOldDraft = await database.saveReportFortnightMemberDraft({ memberId: draftMember.id, authorUserId: draftUser.id, weekStart: "2098-12-16", content: "Versão atrasada", expectedVersion: 1 });
+    assert.equal(rejectedOldDraft.conflict, true);
+    assert.equal(rejectedOldDraft.draft.content, "Segunda versão do rascunho");
+    assert.equal(await database.getReportFortnightMemberDraft({ memberId: draftMember.id, authorUserId: common.id, weekStart: "2098-12-16" }), null);
+    const concurrentSubmission = await Promise.all([
+      database.submitReportFortnightMemberDraft({ memberId: draftMember.id, authorUserId: draftUser.id, weekStart: "2098-12-16", content: "Conteúdo oficial para submissão manual", source: "manual" }),
+      database.submitReportFortnightMemberDraft({ memberId: draftMember.id, authorUserId: draftUser.id, weekStart: "2098-12-16", content: "Tentativa concorrente que não pode substituir", source: "manual" }),
+    ]);
+    assert.equal(concurrentSubmission.filter((result) => result.status === "submitted").length, 1);
+    assert.equal((await database.getReportFortnightMemberNote({ memberId: draftMember.id, weekStart: "2098-12-16" })).submission_source, "manual");
+    assert.equal(await database.getReportFortnightMemberDraft({ memberId: draftMember.id, authorUserId: draftUser.id, weekStart: "2098-12-16" }), null);
     const { generateMonthlyReportPdf } = require("../src/pdf");
     const monthlyPdf = await generateMonthlyReportPdf({
       member,
@@ -126,6 +190,39 @@ async function main() {
     assert.equal((await request("/presenca/exportar-geral.csv")).status, 302, "CSV geral exige autenticação");
     const loggedIn = await request("/login", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ username: "isolated_admin", password: "isolated-password", csrf_token: csrf }) });
     assert.equal(loggedIn.status, 302);
+    const { fortnightStartForDate } = require("../src/services/fortnightService");
+    const { config } = require("../src/config");
+    const currentFortnight = fortnightStartForDate(new Date(), config.reportsTimeZone);
+    const saveDraftResponse = await request("/relatorios/writing/member/draft", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+      body: new URLSearchParams({ csrf_token: csrf, week_start: currentFortnight, content: "Rascunho salvo pela rota autenticada", expected_version: "0" }),
+    });
+    assert.equal(saveDraftResponse.status, 200);
+    const savedDraftPayload = await saveDraftResponse.json();
+    assert.equal(savedDraftPayload.draft.content, "Rascunho salvo pela rota autenticada");
+    const closedDraftResponse = await request("/relatorios/writing/member/draft", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+      body: new URLSearchParams({ csrf_token: csrf, week_start: "2000-01-01", content: "Tentativa de envio atrasada", expected_version: "0" }),
+    });
+    assert.equal(closedDraftResponse.status, 403);
+    const closedSubmitResponse = await request("/relatorios/writing/member/save", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf_token: csrf, member_id: String(member.id), week_start: "2000-01-01", content: "Tentativa direta de submissão atrasada" }),
+    });
+    assert.equal(closedSubmitResponse.status, 302);
+    assert.equal(await database.getReportFortnightMemberNote({ memberId: member.id, weekStart: "2000-01-01" }), null);
+    const submitDraftResponse = await request("/relatorios/writing/member/save", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf_token: csrf, member_id: String(member.id), week_start: currentFortnight, content: "Rascunho submetido pela rota autenticada" }),
+    });
+    assert.equal(submitDraftResponse.status, 302);
+    const submittedFromRoute = await database.getReportFortnightMemberNote({ memberId: member.id, weekStart: currentFortnight });
+    assert.equal(submittedFromRoute.submission_source, "manual");
+    assert.equal(await database.getReportFortnightMemberDraft({ memberId: member.id, authorUserId: adminUser.id, weekStart: currentFortnight }), null);
     for (const path of ["/home", "/members", "/projects", "/planner", "/relatorios", "/almoxarifado", "/almoxarifado?tab=manage", "/almoxarifado/api/dashboard", "/manutencao-usuarios", "/mensagens", "/presenca/eventos", "/presenca/ouvintes", "/espacos-escrita"]) {
       const response = await request(path);
       const content = await response.text();
